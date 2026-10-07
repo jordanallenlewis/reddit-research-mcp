@@ -1,0 +1,255 @@
+# reddit-research-mcp
+
+A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for researching
+Reddit. It lets an MCP client such as Claude Code or Claude Desktop search posts, browse and
+discover communities, read whole threads including the comments Reddit hides behind
+"load more" links, read subreddit rules and wikis, and check who is posting.
+
+It never posts, votes, edits or deletes anything. Every tool is marked read-only.
+
+## Highlights
+
+- Ten tools covering search, browsing, community discovery, full threads, hidden-comment
+  expansion, bulk post bodies, user history and "other discussions" of a link.
+- Thread coverage is explicit: every "load more" stub that fits the response budget is listed
+  with its comment ids, and each thread ends with
+  `Shown X of Y comments; Z more in N stubs -> expand_comments(...)`. When the budget cuts
+  comments, the line says how many stubs sit inside them and lists the cut comments' ids instead.
+- Compact text output: one header line per item with id, subreddit, UTC date, score, upvote
+  ratio, comment count, author, flair, post type and flags. Every response has a size budget
+  and says how to get the rest when it is cut.
+- Accepts the identifiers people paste: post ids, `t3_` fullnames, reddit.com and
+  old.reddit.com permalinks, comment permalinks, redd.it links, `r/name`, `u/name`.
+- Errors say what went wrong and what to do next, for example
+  `r/dremio does not exist or is private; use search_subreddits to find the right name; similar names: r/dremio_lakehouse`.
+- Works without credentials. Optional Reddit app credentials give the server its own quota.
+- Never stalls a tool call on rate limits: short waits (up to 15 s) are absorbed, longer ones
+  fail fast with `Reddit rate limit reached; retry after N s`. Every tool call ends within 45 s.
+
+## Requirements
+
+- [uv](https://docs.astral.sh/uv/) (provides `uvx`). Python 3.11 or newer is fetched by uv if needed.
+
+## Install
+
+### Claude Code
+
+```bash
+claude mcp add --scope user reddit -- uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp
+```
+
+With your own Reddit app credentials (see [Authentication](#authentication)):
+
+```bash
+claude mcp add --scope user reddit \
+  -e REDDIT_CLIENT_ID=your_client_id -e REDDIT_CLIENT_SECRET=your_client_secret \
+  -- uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp
+```
+
+### Claude Desktop
+
+Add this to `claude_desktop_config.json` (Settings, Developer, Edit Config) and restart the app:
+
+```json
+{
+  "mcpServers": {
+    "reddit": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/jordanallenlewis/reddit-research-mcp",
+        "reddit-research-mcp"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+If the app cannot find `uvx`, use its full path (`which uvx`, often `~/.local/bin/uvx`).
+Put `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` in `env` to use your own app.
+
+### Other MCP clients
+
+The server speaks MCP over stdio. Run it with:
+
+```bash
+uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp
+```
+
+### From a local checkout
+
+```bash
+git clone https://github.com/jordanallenlewis/reddit-research-mcp
+cd reddit-research-mcp
+uv sync
+uv run reddit-research-mcp --version
+claude mcp add --scope user reddit -- uv run --directory "$PWD" reddit-research-mcp
+```
+
+## Tools
+
+| Tool | What it does | Reddit requests |
+|---|---|---|
+| `search_reddit(query, subreddit="", sort="relevance", time="all", limit=25, after=None, body_chars=400)` | Search post titles and bodies, site-wide or in `a+b` subreddits. Returns a `next: after=` cursor. | 1 |
+| `browse_subreddit(subreddit, listing="hot", time="week", limit=25, after=None, body_chars=400)` | `hot`, `new`, `top`, `rising` or `controversial` posts of one or more subreddits. `time` applies to top and controversial. | 1 |
+| `search_subreddits(query, limit=10)` | Find communities by description, plus names that start with the query, with subscribers, NSFW flag, creation date and description. | 2 to 3 |
+| `get_subreddit_info(subreddit, include_rules=True, include_sidebar=False, sidebar_chars=3000)` | Size, age, type, description, rules, sidebar and wiki page list. | 2 to 3 |
+| `get_subreddit_wiki(subreddit, page="index", max_chars=20000)` | Read a wiki page (FAQs, guides), or list pages with `page=""`. | 1 |
+| `get_post(post, comment_sort="top", comment_limit=200, comment_depth=8, comment_id=None, context=0, body_chars=6000, max_chars=40000)` | The post and its comment tree in one request, with the "more" stubs and a coverage line. The body shows its first 6,000 characters by default so long posts leave room for comments; `get_posts(..., body_chars=40000)` returns the whole text. A `comment_id` that is not in the post is an error that says where the comment lives, when Reddit knows. | 1 (2 when a `comment_id` is not found) |
+| `expand_comments(post, comment_ids, sort="top", max_chars=40000)` | Load the comments behind "more" stubs, as reply trees. Up to 500 ids per call. | 1 per 100 ids |
+| `get_posts(posts, body_chars=4000, max_chars=60000)` | Full headers and bodies of many posts at once (no comments). | 1 per 100 posts |
+| `get_user_activity(username, kind="overview", sort="new", time="all", limit=25, after=None, body_chars=400)` | Account age and karma, recent posts and comments, and which subreddits the activity is concentrated in. | 2 |
+| `find_other_discussions(post_or_url, limit=25)` | Crossposts and other submissions of a post's link, or every thread that submitted an external URL. | 1 to 2 |
+
+Limits are clamped to the ranges the tool descriptions state (for example `limit` 1 to 100,
+`comment_limit` 1 to 500, `comment_depth` 1 to 10), and the output says when a value was clamped.
+
+### Output format
+
+A listing item looks like this:
+
+```text
+[1abc234] r/dataengineering 2024-10-02 31(91%) 54c u/example_author [Discussion] self edited
+Title of the post
+  First 400 characters of the body ... [+1234 chars]
+```
+
+That is: `[id] r/subreddit date score(upvote ratio) comments author [flair] type flags`.
+Types are `self`, `link`, `image`, `video`, `gallery`, `poll` and `crosspost`. Flags are `nsfw`,
+`spoiler`, `pinned`, `locked`, `deleted` or `removed(...)`, `edited`, `mod` (or `admin`),
+`score-hidden` and, in `get_post`/`get_posts`, `archived`. `score-hidden` means the subreddit
+hides the score of new posts on its site; the API still returns it, and the number shown is that
+value. A score of `?` means Reddit sent none (comments with hidden scores). Link posts add a
+`url:` line, galleries an item count, polls their options, crossposts the original post id and
+subreddit. Listings end with `next: after=<cursor>` or `next: none (end of results)`.
+
+Comments in `get_post` are indented by depth:
+
+```text
+[k2x9a1b] 2024-10-03 12 u/example_user (OP) (edited) [flair text]
+  Comment body
+  [k2x9c3d] 2024-10-03 4 u/another_user
+    Reply body
+  [more: 7 comments; ids: k2xa001,k2xa002]
+[k2x9z9z] 2024-10-04 [removed]
+[more top-level: 1,552 comments; 540 ids: ...]
+
+Shown 180 of 2,849 comments; 2,669 more in 45 stubs -> expand_comments(post="1abc234", comment_ids=[ids from the [more ...] lines])
+```
+
+When `max_chars` cuts the thread, stubs inside the comments that were not shown cannot be listed.
+The coverage line then splits the count, for example
+`2,468 more in 336 stubs: 50 stubs listed with ids -> expand_comments(...); 286 stubs (1,268 comments) inside the loaded comments not shown, ids not listed`,
+and the next line lists the ids of the comments that were not shown, which `expand_comments`
+accepts too. Raising `max_chars` or lowering `body_chars` shows more in one call.
+
+A comment's permalink is the post permalink plus the comment id; the thread header prints the
+template once instead of repeating it on every comment.
+
+## Search tips
+
+Reddit's search is loose. Unquoted multi-word queries match posts containing any of the words
+and rank by popularity, so `dremio reflections tips` returns unrelated posts about game
+graphics and tipping. What works:
+
+- Use one to three specific words and drop generic ones such as tips, best or help.
+- Quote the rare or exact term: `"dremio" reflections`.
+- Require terms with `AND`: `dremio AND iceberg`.
+- Field operators: `subreddit:dataengineering`, `flair:Discussion`, `title:benchmark`,
+  `selftext:kubernetes`, `author:name`, and `-subreddit:name` to exclude a community.
+- Search several communities in one call with `subreddit="dataengineering+dremio_lakehouse"`.
+- Reddit's API cannot search comment text. To find advice inside threads, search with
+  `sort="comments"` (most discussed), then read the threads with `get_post` and expand stubs.
+- Not sure of a community name? `search_subreddits` matches descriptions and name prefixes.
+
+## Authentication
+
+| Variables set | Mode |
+|---|---|
+| none | Anonymous. Uses a public installed-app client id, the same approach as the redditwarp library. No account needed. |
+| `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` | App-only OAuth (client credentials). Gives the server its own rate-limit quota. |
+| both of the above and `REDDIT_REFRESH_TOKEN` | User OAuth with a refresh token issued to that app. |
+
+Any other combination (for example a client id without a secret) is a configuration error.
+The server still starts, logs the problem to stderr, and every tool call returns the message.
+
+To create credentials, sign in at <https://www.reddit.com/prefs/apps>, choose "create another
+app", pick the "script" type, and use the string under the app name as `REDDIT_CLIENT_ID` and
+the "secret" as `REDDIT_CLIENT_SECRET`. Reddit's API terms apply to your use.
+
+Other settings:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REDDIT_USER_AGENT` | `reddit-research-mcp/<version> (+https://github.com/jordanallenlewis/reddit-research-mcp)` | User-Agent sent to Reddit. Reddit asks for a descriptive one that names you. |
+| `REDDIT_RESEARCH_MCP_LOG_LEVEL` | `WARNING` | Set `DEBUG` to log every request (path, status, latency, remaining quota) to stderr. |
+
+## Rate limits
+
+Reddit allows about 100 requests per minute per OAuth client, counted over a 10-minute window
+(1,000 requests per 600 s). In anonymous mode the client id is shared with other installations,
+so the window can already be partly used when the server starts; set your own credentials for
+heavy use.
+
+The server reads Reddit's `x-ratelimit-*` headers on every response. When the window is used
+up it waits if the reset is at most 15 s away and otherwise fails at once with
+`Reddit rate limit reached; retry after N s`. A `429` response is retried once when
+`Retry-After` is at most 15 s. Network errors and `5xx` responses are retried once after 1 s.
+A request times out after 15 s, and its retry after 10 s, so a dead network fails a request in
+about 26 s. Tools that send several requests (`get_posts`, `expand_comments`) start no new batch
+after 15 s and list what they did not fetch, and every tool call is cut off after 45 s with an
+error. Comment expansion calls are sent one at a time, as Reddit requires.
+
+## Troubleshooting
+
+| Message | Meaning and fix |
+|---|---|
+| `r/NAME does not exist or is private; use search_subreddits ...` | Reddit redirected the name to its search page. Check the spelling or call `search_subreddits`. |
+| `r/NAME is private` / `is quarantined` / `is banned` / `is restricted to Reddit Premium` | The community cannot be read with this server's access. |
+| `r/NAME has its wiki disabled` | Use `get_subreddit_info` for the description, rules and sidebar. |
+| `post ID not found` | Deleted, removed or a wrong id. Pass the `[id]` from a listing or the post URL. |
+| `comment ID not found in post ID` / `comment ID belongs to post OTHER` | The `comment_id` is not in that thread: it was deleted, mistyped, or belongs to another post (the message then names the right one). |
+| `Reddit rate limit reached; retry after N s` | Wait, or set your own `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`. |
+| `Network error reaching Reddit (...)` / `did not respond (waited 15 s, then 10 s on a retry)` | Connectivity problem or a slow Reddit; it was already retried once. |
+| `TOOL gave up after 45 s` | Reddit was too slow for the whole call (including rate-limit waits). Retry later or ask for less. |
+| `Could not get an anonymous Reddit access token` | Reddit refused the anonymous token. Retry later or configure your own app. |
+| `Configuration error: ...` | Fix the `REDDIT_*` variables as the message says. |
+| HTML `403` on every call | Reddit may be blocking the network or user agent. Set credentials and a descriptive `REDDIT_USER_AGENT`. |
+| `ModuleNotFoundError: No module named 'reddit_research_mcp'` from a local checkout on macOS | The checkout is in a folder synced by iCloud Drive (such as Desktop or Documents). iCloud marks files inside `.venv` as hidden, and Python 3.13 skips hidden `.pth` files, which breaks editable installs. Move the checkout out of the synced folder, or keep the environment out of sync with `rm -rf .venv && mkdir .venv.nosync && ln -s .venv.nosync .venv && uv sync`, or run with `uv run --no-editable`. |
+
+Reddit content is untrusted user-generated text. The server returns it verbatim as data; the
+client and model should treat it as material to evaluate, not as instructions.
+
+## Development
+
+```bash
+uv sync                      # create the environment with dev dependencies
+uv run pytest -q             # offline tests with synthetic fixtures
+uv run ruff check .          # lint (settings in pyproject.toml)
+uv run python scripts/smoke.py   # live end-to-end check over stdio, about 30 requests
+```
+
+`scripts/smoke.py` starts the server as a subprocess, runs `initialize` and `tools/list`, calls
+every tool against live Reddit, and prints latency, output size and Reddit request count per
+call. Pass `--server-cmd` to test another command, such as the `uvx` install.
+
+Code layout:
+
+- `src/reddit_research_mcp/server.py`: tool definitions and error messages.
+- `src/reddit_research_mcp/reddit.py`: HTTP, OAuth (via redditwarp), rate limiting, retries.
+- `src/reddit_research_mcp/format.py`: text rendering of posts, comments and listings.
+- `src/reddit_research_mcp/refs.py`: parsing of ids, URLs, subreddit and user names.
+
+redditwarp is used for OAuth token handling and the HTTP transport only. Endpoints are called
+directly and their JSON parsed here, because redditwarp 1.3.0's model loaders fail on some
+current API responses.
+
+## Credits
+
+Started from [adhikasp/mcp-reddit](https://github.com/adhikasp/mcp-reddit) (MIT), which
+exposed hot threads and single posts. This project rewrites it with the tools above.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
