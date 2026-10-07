@@ -163,6 +163,7 @@ def test_wiki_page_truncation_and_listing():
     fake = FakeReddit({
         ("GET", "/r/x1/wiki/faq"): ok(page),
         ("GET", "/r/x1/wiki/pages"): ok({"kind": "wikipagelisting", "data": ["index", "faq"]}),
+        ("GET", "/r/x1/about"): ok({"kind": "t5", "data": {"display_name": "x1", "over18": False}}),
     })
     server.set_client(fake)
     out = run(server.get_subreddit_wiki(subreddit="x1", page="FAQ", max_chars=500))

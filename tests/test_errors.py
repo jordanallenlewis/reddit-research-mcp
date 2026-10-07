@@ -1,6 +1,6 @@
 import pytest
 from fastmcp.exceptions import ToolError
-from fixtures import FakeReddit, listing, ok, raw, run, t3
+from fixtures import FakeReddit, listing, ok, raw, run, sfw_info, t3
 from redditwarp.core.exceptions import ClientCredentialsError
 from redditwarp.exceptions import RedditError
 from redditwarp.http.exceptions import StatusCodeException, TimeoutException
@@ -162,6 +162,7 @@ def test_missing_subreddit_maps_to_actionable_error_with_suggestions():
     fake = FakeReddit({
         ("GET", "/r/dremio/top"): REDIRECT,
         ("GET", "/api/search_reddit_names"): ok({"names": ["dremio_lakehouse", "dremio_x"]}),
+        ("GET", "/api/info"): sfw_info,
     })
     server.set_client(fake)
     with pytest.raises(ToolError) as e:

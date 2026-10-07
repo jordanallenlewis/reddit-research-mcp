@@ -1,6 +1,6 @@
 import pytest
 from fastmcp.exceptions import ToolError
-from fixtures import FakeReddit, comment, cont, listing, more, ok, post, run, run_raw
+from fixtures import FakeReddit, comment, cont, listing, more, ok, post, run, run_raw, sfw_info
 
 from reddit_research_mcp import format as fmt
 from reddit_research_mcp import server
@@ -265,12 +265,12 @@ def test_morechildren_forest_and_expand_comments_batches_serially():
             {"kind": k, "data": d} for k, d in zip(kinds, out, strict=True)
         ]}}})
 
-    fake = FakeReddit({("GET", "/api/morechildren"): things})
+    fake = FakeReddit({("GET", "/api/morechildren"): things, ("GET", "/api/info"): sfw_info})
     server.set_client(fake)
     ids = [f"e{i}" for i in range(150)]
     out = run(server.expand_comments(post="abc123", comment_ids=ids))
-    assert fake.paths() == ["/api/morechildren", "/api/morechildren"]
-    first, second = fake.calls[0][2], fake.calls[1][2]
+    assert fake.paths() == ["/api/info", "/api/morechildren", "/api/morechildren"]  # NSFW check first
+    first, second = fake.calls[1][2], fake.calls[2][2]
     assert len(first["children"].split(",")) == 100 and len(second["children"].split(",")) == 50
     assert first["link_id"] == "t3_abc123" and first["sort"] == "top"
     assert "-- replies to [c1] --" in out
@@ -283,17 +283,18 @@ def test_morechildren_forest_and_expand_comments_batches_serially():
 def test_expand_comments_reports_unfetched_ids_beyond_request_cap():
     fake = FakeReddit({("GET", "/api/morechildren"): ok({"json": {"errors": [], "data": {"things": [
         comment("e0", "One.", parent="t3_abc123")
-    ]}}})})
+    ]}}}), ("GET", "/api/info"): sfw_info})
     server.set_client(fake)
     ids = [f"e{i}" for i in range(620)]
     out = run(server.expand_comments(post="abc123", comment_ids=",".join(ids)))
-    assert len(fake.calls) == 5
+    assert fake.paths().count("/api/morechildren") == 5
     assert "Not fetched yet (120 ids)" in out
     assert "-- top-level comments --" in out
 
 
 def test_expand_comments_empty_result():
-    fake = FakeReddit({("GET", "/api/morechildren"): ok({"json": {"errors": [], "data": {"things": []}}})})
+    fake = FakeReddit({("GET", "/api/morechildren"): ok({"json": {"errors": [], "data": {"things": []}}}),
+                       ("GET", "/api/info"): sfw_info})
     server.set_client(fake)
     out = run(server.expand_comments(post="abc123", comment_ids=["gone1"]))
     assert "returned no comments" in out
@@ -322,13 +323,13 @@ def test_tiny_budget_is_still_respected():
 
     fake = FakeReddit({("GET", "/api/morechildren"): ok({"json": {"errors": [], "data": {"things": [
         comment(f"e{i}", "text " * 60, parent="t3_abc123") for i in range(40)
-    ]}}})})
+    ]}}}), ("GET", "/api/info"): sfw_info})
     server.set_client(fake)
     out = run_raw(server.expand_comments(post="abc123", comment_ids=[f"e{i}" for i in range(700)], max_chars=2000))
     assert len(out) <= 2000
     assert "Not fetched yet (600 ids)" in out and "Output budget reached" in out
     # stops fetching once the budget is spent; the second call explains the ids not returned
-    assert fake.paths() == ["/api/morechildren", "/api/info"]
+    assert fake.paths() == ["/api/info", "/api/morechildren", "/api/info"]
 
 
 def test_fit_cuts_body_not_tail():
@@ -400,7 +401,8 @@ def test_expand_comments_coverage_counts_hidden_stubs():
     things = []  # /api/morechildren answers with a flat list; stubs point at their parent
     for i in range(30):
         things += [comment(f"e{i}", "text " * 80, parent="t3_abc123"), more([f"h{i}"], 3, parent=f"t1_e{i}")]
-    fake = FakeReddit({("GET", "/api/morechildren"): ok({"json": {"errors": [], "data": {"things": things}}})})
+    fake = FakeReddit({("GET", "/api/morechildren"): ok({"json": {"errors": [], "data": {"things": things}}}),
+                       ("GET", "/api/info"): sfw_info})
     server.set_client(fake)
     out = run(server.expand_comments(post="abc123", comment_ids=[f"e{i}" for i in range(30)], max_chars=4000))
     assert "inside the loaded comments not shown, ids not listed" in out
@@ -485,7 +487,13 @@ def test_expand_comments_reports_ids_not_returned():
 
 
 def test_expand_comments_lists_ids_when_lookup_fails():
-    fake = FakeReddit({("GET", "/api/morechildren"): ok({"json": {"errors": [], "data": {"things": []}}})})
+    def info(params):
+        if params["id"].startswith("t3_"):
+            return sfw_info(params)  # the NSFW check succeeds, the missing-id lookup fails
+        raise RuntimeError("lookup down")
+
+    fake = FakeReddit({("GET", "/api/morechildren"): ok({"json": {"errors": [], "data": {"things": []}}}),
+                       ("GET", "/api/info"): info})
     server.set_client(fake)
     out = run(server.expand_comments(post="abc123", comment_ids=["gone1", "gone2"]))
     assert "returned no comments" in out

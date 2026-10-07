@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/).
 
+## [0.2.0] - 2026-10-07
+
+### Added
+
+- `include_nsfw` on every tool, default `false`. Posts, comments, crossposts and communities
+  that Reddit marks 18+ are hidden, and each result counts what was hidden. Single-item tools
+  (`get_post`, `expand_comments`, `get_subreddit_info`, `get_subreddit_wiki`,
+  `find_other_discussions`) return a notice for 18+ items.
+- `REDDIT_RESEARCH_MCP_BLOCK_NSFW=1` keeps NSFW hidden even when a call asks for it.
+
+### Changed
+
+- NSFW content is no longer shown by default. Browsing an 18+ community previously returned
+  its posts.
+- Community name suggestions are checked with one `/api/info` request, because Reddit's name
+  lookup returns 18+ communities; unchecked names are not shown.
+- `expand_comments` and `get_subreddit_wiki` send one extra request to check the post or
+  community when NSFW is hidden. If that check cannot run because of a network error, the
+  tool fails instead of showing unchecked content.
+
 ## [0.1.1] - 2026-10-07
 
 Fixes from a full live smoke test of every tool.

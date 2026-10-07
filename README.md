@@ -22,6 +22,8 @@ It never posts, votes, edits or deletes anything. Every tool is marked read-only
   old.reddit.com permalinks, comment permalinks, redd.it links, `r/name`, `u/name`.
 - Errors say what went wrong and what to do next, for example
   `r/dremio does not exist or is private; use search_subreddits to find the right name; similar names: r/dremio_lakehouse`.
+- NSFW (18+) posts, comments and communities are hidden by default; every tool takes
+  `include_nsfw=true` to show them, and a server setting can block them outright.
 - Works without credentials. Optional Reddit app credentials give the server its own quota.
 - Never stalls a tool call on rate limits: short waits (up to 15 s) are absorbed, longer ones
   fail fast with `Reddit rate limit reached; retry after N s`. Every tool call ends within 45 s.
@@ -158,6 +160,35 @@ Every result ends with a line such as `[2 Reddit requests, 0.4 s]`.
 A comment's permalink is the post permalink plus the comment id; the thread header prints the
 template once instead of repeating it on every comment.
 
+## NSFW content
+
+Every tool takes `include_nsfw` (default `false`). With the default:
+
+- Posts, comments and crossposts that Reddit marks 18+ (`over_18`), and communities marked
+  18+ (`over18`), are removed before formatting. Search and community search also ask Reddit
+  not to return them.
+- Each result says how many items were hidden, for example
+  `25 posts (3 NSFW posts hidden; include_nsfw=true shows them)`.
+- `get_post`, `expand_comments`, `get_subreddit_info`, `get_subreddit_wiki` and
+  `find_other_discussions` on an 18+ post or community return a short notice instead of
+  the content. `get_posts` lists the hidden ids.
+- `get_user_activity` leaves 18+ items out of the listing and the subreddit summary, and hides
+  the profile description of an 18+ profile.
+- Community name suggestions (in errors and `search_subreddits`) are checked first, because
+  Reddit's name lookup returns 18+ communities; names whose status cannot be checked are
+  not shown.
+
+Pass `include_nsfw=true` to show everything. Set `REDDIT_RESEARCH_MCP_BLOCK_NSFW=1` in the
+server's environment to keep NSFW hidden whatever the tool call asks:
+
+```bash
+claude mcp add --scope user reddit -e REDDIT_RESEARCH_MCP_BLOCK_NSFW=1 \
+  -- uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp
+```
+
+The filter relies on Reddit's own 18+ flags. Posts that Reddit does not flag, in communities
+that are not marked 18+, are shown.
+
 ## Search tips
 
 Reddit's search is loose. Unquoted multi-word queries match posts containing any of the words
@@ -196,6 +227,7 @@ Other settings:
 |---|---|---|
 | `REDDIT_USER_AGENT` | `reddit-research-mcp/<version> (+https://github.com/jordanallenlewis/reddit-research-mcp)` | User-Agent sent to Reddit. Reddit asks for a descriptive one that names you. |
 | `REDDIT_RESEARCH_MCP_LOG_LEVEL` | `WARNING` | Set `DEBUG` to log every request (path, status, latency, remaining quota) to stderr. |
+| `REDDIT_RESEARCH_MCP_BLOCK_NSFW` | unset | Set `1` to hide NSFW content even when a tool call passes `include_nsfw=true` (for shared or work installs). |
 
 ## Rate limits
 

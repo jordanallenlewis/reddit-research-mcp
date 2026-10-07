@@ -373,6 +373,23 @@ def listing_subreddit(d: Mapping[str, Any], desc_chars: int = 300) -> str:
     return "\n".join(lines)
 
 
+def is_nsfw(thing: Mapping[str, Any]) -> bool:
+    """True when Reddit marks a post, comment or community 18+ (also via a crossposted original).
+
+    Accepts a listing child ({"kind", "data"}) or a bare data mapping. Posts in NSFW
+    communities carry over_18 too, so this also covers whole communities' content.
+    """
+    d = thing.get("data") if isinstance(thing.get("data"), Mapping) else thing
+    if not isinstance(d, Mapping):
+        return False
+    if d.get("over_18") or d.get("over18"):
+        return True
+    parents = d.get("crosspost_parent_list")
+    if isinstance(parents, list):
+        return any(isinstance(p, Mapping) and (p.get("over_18") or p.get("over18")) for p in parents)
+    return False
+
+
 def render_thing(thing: Mapping[str, Any], body_chars: int, *, omit_author: bool = False) -> str:
     """Render one listing child of any kind; never raises."""
     try:
@@ -683,7 +700,7 @@ def activity_summary(children: Iterable[Mapping[str, Any]], top: int = 8) -> str
     return line
 
 
-def user_header(d: Mapping[str, Any], now: float) -> str:
+def user_header(d: Mapping[str, Any], now: float, *, show_nsfw_profile: bool = True) -> str:
     created = d.get("created_utc")
     parts = [f"u/{d.get('name', '?')}", f"created {date_str(created)}"]
     try:
@@ -711,6 +728,8 @@ def user_header(d: Mapping[str, Any], now: float) -> str:
         parts.append("flags: " + ", ".join(flags))
     line = "  ".join(parts)
     desc = flatten(sub.get("public_description") if sub else "")
-    if desc:
+    if desc and sub.get("over_18") and not show_nsfw_profile:
+        line += "\nprofile: hidden (NSFW profile; include_nsfw=true shows it)"
+    elif desc:
         line += "\nprofile: " + truncate(desc, 300)
     return line

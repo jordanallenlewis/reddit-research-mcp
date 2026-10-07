@@ -166,3 +166,12 @@ def run(coro: Any) -> Any:
 
 
 Factory = Callable[..., Any]
+
+
+def sfw_info(params: dict) -> Any:
+    """/api/info answer for the NSFW checks: every t3_ id is a safe post, t5 names safe communities."""
+    if params.get("sr_name"):
+        names = str(params["sr_name"]).split(",")
+        return ok(listing([{"kind": "t5", "data": {"display_name": n, "over18": False}} for n in names]))
+    ids = str(params.get("id", "")).split(",")
+    return ok(listing([t3(id=i[3:]) for i in ids if i.startswith("t3_")]))
