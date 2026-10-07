@@ -355,3 +355,70 @@ def test_get_posts_stops_starting_batches_after_the_cutoff(monkeypatch):
     assert len(fake.calls) == 1  # the first batch always runs
     assert out.startswith("100 of 150 posts")
     assert "Stopped after -1 s; not fetched (50): get_posts(posts=[p100, p101," in out
+
+
+def test_deleted_author_placeholder_is_explained():
+    server.set_client(FakeReddit({}))
+    for name in ("[deleted]", "[removed]"):
+        with pytest.raises(ToolError, match="placeholder for a deleted or removed author"):
+            run(server.get_user_activity(username=name))
+
+
+def test_get_posts_cut_body_hint():
+    fake = FakeReddit({("GET", "/api/info"): ok(listing([t3(id="long1", selftext="word " * 400)]))})
+    server.set_client(fake)
+    out = run(server.get_posts(posts=["long1"], body_chars=300))
+    assert "[+" in out and 'get_posts(posts=[long1], body_chars=40000) returns the whole text' in out
+    out = run(server.get_posts(posts=["long1"], body_chars=40000))
+    assert "returns the whole text" not in out
+
+
+def test_private_subreddit_info_falls_back_to_listing_data():
+    from reddit_research_mcp.reddit import RedditLabelError
+
+    sub = {"kind": "t5", "data": {"display_name": "secret1", "subscribers": 1234, "created_utc": 1600000000,
+                                  "subreddit_type": "private", "public_description": "Members only club."}}
+    fake = FakeReddit({
+        ("GET", "/r/secret1/about"): RedditLabelError("private", "", 403),
+        ("GET", "/api/info"): ok(listing([sub])),
+    })
+    server.set_client(fake)
+    out = run(server.get_subreddit_info(subreddit="secret1"))
+    assert out.startswith("r/secret1 1,234 subscribers created 2020-09-13")
+    assert "Members only club." in out
+    assert out.endswith("r/secret1 is private: rules, wiki and posts are visible to approved members only.")
+
+
+def test_banned_subreddit_info_still_errors():
+    from reddit_research_mcp.reddit import RedditLabelError
+
+    fake = FakeReddit({("GET", "/r/gone1/about"): RedditLabelError("banned", "", 404)})
+    server.set_client(fake)
+    with pytest.raises(ToolError, match="banned"):
+        run(server.get_subreddit_info(subreddit="gone1"))
+
+
+def test_user_activity_summary_uses_full_page_and_cursor_after_last_shown():
+    about = {"kind": "t2", "data": {"name": "example_user", "created_utc": 1600000000}}
+    items = [t3(id=f"s{i}", sub="alpha" if i < 60 else "beta") for i in range(100)]
+    fake = FakeReddit({
+        ("GET", "/user/example_user/about"): ok(about),
+        ("GET", "/user/example_user/overview"): ok(listing(items, after="t3_s99")),
+    })
+    server.set_client(fake)
+    out = run(server.get_user_activity(username="example_user", limit=5))
+    assert fake.calls[1][2]["limit"] == "100"
+    assert "Activity by subreddit (100 items" in out and "r/alpha 60 (60%)" in out
+    assert "[s4]" in out and "[s5]" not in out
+    assert out.endswith("next: after=t3_s4")
+
+
+def test_every_result_ends_with_request_and_time_footer():
+    import re
+
+    from fixtures import run_raw
+
+    fake = FakeReddit({("GET", "/r/x1/hot"): ok(listing([t3(id="g1")]))})
+    server.set_client(fake)
+    out = run_raw(server.browse_subreddit(subreddit="x1"))
+    assert re.search(r"\n\[1 Reddit request, \d+\.\d s\]$", out)

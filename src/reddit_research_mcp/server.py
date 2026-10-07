@@ -84,8 +84,9 @@ def deadline(fn: Any) -> Any:
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         before = _requests_sent()
+        started = time.monotonic()
         try:
-            return await asyncio.wait_for(fn(*args, **kwargs), TOOL_DEADLINE)
+            result = await asyncio.wait_for(fn(*args, **kwargs), TOOL_DEADLINE)
         except TimeoutError:
             sent = max(0, _requests_sent() - before)
             raise ToolError(
@@ -93,6 +94,10 @@ def deadline(fn: Any) -> Any:
                 f"({fmt.plural(sent, 'request')} sent in this call, nothing returned). Retry in a "
                 "minute, or ask for less (smaller limit, fewer ids)."
             ) from None
+        if isinstance(result, str):
+            sent = max(0, _requests_sent() - before)
+            result += f"\n[{fmt.plural(sent, 'Reddit request')}, {_elapsed(started):.1f} s]"
+        return result
 
     return wrapper
 
@@ -140,7 +145,11 @@ def _notes(*notes: str | None) -> str:
 
 
 def _fit(head: str, body: str, tail: str, budget: int) -> str:
-    """Join head, body and tail; if over budget, cut the body (never the tail) at a line break."""
+    """Join head, body and tail; if over budget, cut the body (never the tail) at a line break.
+
+    FOOTER_CHARS stay free for the request/time line that every tool result ends with.
+    """
+    budget -= FOOTER_CHARS
     out = "\n".join(x for x in (head, body, tail) if x)
     over = len(out) - budget
     if over <= 0 or not body:
@@ -152,9 +161,19 @@ def _fit(head: str, body: str, tail: str, budget: int) -> str:
     return "\n".join(x for x in (head, body, tail) if x)
 
 
+FOOTER_CHARS = 40  # "\n[12 Reddit requests, 31.4 s]" appended to every result
+MIN_STUB_IDS = 10  # ids a stub line always lists, however small the budget
+FOOTER_RESERVE = 600  # coverage and budget lines, without their id lists
+
+
 def _id_cap(budget: int, most: int) -> int:
     """How many ids (about 8 chars each) a footer line may list for this budget."""
-    return min(most, max(10, budget // 40))
+    return min(most, max(MIN_STUB_IDS, budget // 40))
+
+
+def _footer_id_cap(budget: int) -> int:
+    """Ids for the "budget reached" line: a smaller share, so small budgets keep comments."""
+    return min(100, max(MIN_STUB_IDS, budget // 80))
 
 
 def _listing_children(root: Any) -> tuple[list, str | None]:
@@ -251,6 +270,46 @@ async def _missing_comment(pid: str, cid: str, *, post_seen: bool) -> ToolError:
     return ToolError(
         f"comment {cid} not found in post {pid}: it was deleted, or the id is wrong; call {without}"
     )
+
+
+async def _explain_missing_comments(pid: str, ids: list[str], cap: int) -> str:
+    """One line on ids /api/morechildren did not return, grouped by reason.
+
+    One best-effort /api/info lookup when there are at most INFO_BATCH ids; otherwise, or
+    if it fails, the ids are still listed so nothing disappears silently.
+    """
+    why: dict[str, str] = {}
+    if len(ids) <= INFO_BATCH:
+        try:
+            root = await asyncio.wait_for(
+                get_client().get("/api/info", id=",".join("t1_" + x for x in ids)),
+                timeout=LOOKUP_TIMEOUT,
+            )
+            children, _ = _listing_children(root)
+            for c in children:
+                d = c.get("data") if isinstance(c, Mapping) else None
+                if not isinstance(d, Mapping) or not d.get("id"):
+                    continue
+                link = str(d.get("link_id") or "").removeprefix("t3_")
+                body = str(d.get("body") or "").strip()
+                if link and link != pid:
+                    why[str(d["id"])] = f"in post {link}"
+                elif body in fmt.DELETED_BODIES:
+                    why[str(d["id"])] = body.strip("[]")
+                else:
+                    why[str(d["id"])] = "not returned by Reddit"
+        except Exception:
+            why = {}
+    if not why:
+        return (
+            f"Not returned ({len(ids)}; removed, deleted or not in this post): "
+            f"{fmt.stub_ids(ids, cap)}"
+        )
+    groups: dict[str, list[str]] = {}
+    for x in ids:
+        groups.setdefault(why.get(x, "not found"), []).append(x)
+    parts = [f"{reason}: {fmt.stub_ids(xs, cap)}" for reason, xs in groups.items()]
+    return f"Not returned ({len(ids)}): " + "; ".join(parts)
 
 
 async def tool_error(
@@ -414,7 +473,7 @@ async def search_reddit(
       "dremio"                     quote a rare or exact term or phrase
       dremio AND iceberg           require both terms
       subreddit:dataengineering    only that community (or pass subreddit="a+b")
-      -subreddit:jobs              exclude a community
+      -subreddit:jobboardsearch    exclude a community (job-bot spam is common for product names)
       flair:Discussion  title:benchmark  selftext:kubernetes  author:name  site:github.com
     Each result starts with [id]: read one thread with get_post, or the full bodies of
     many results with get_posts. To find advice inside comments, open the most
@@ -581,6 +640,31 @@ async def search_subreddits(
         raise await tool_error(exc) from exc
 
 
+_RESTRICTED_LABELS = {
+    "private": "private: rules, wiki and posts are visible to approved members only",
+    "gold_only": "restricted to Reddit Premium members: rules, wiki and posts are not readable here",
+    "gold_restricted": "restricted to Reddit Premium members: rules, wiki and posts are not readable here",
+    "quarantined": "quarantined: Reddit shows it only to logged-in accounts that opt in",
+}
+
+
+async def _restricted_subreddit_info(sr: str, exc: BaseException) -> str | None:
+    """For a private or restricted community, the public listing data /api/info still has."""
+    label = str(getattr(exc, "label", "") or "").lower()
+    if label not in _RESTRICTED_LABELS and not (isinstance(exc, HTTPError) and exc.status == 403):
+        return None
+    try:
+        root = await asyncio.wait_for(get_client().get("/api/info", sr_name=sr), timeout=LOOKUP_TIMEOUT)
+        children, _ = _listing_children(root)
+    except Exception:
+        return None
+    d = next((c.get("data") for c in children if isinstance(c, Mapping) and c.get("kind") == "t5"), None)
+    if not isinstance(d, Mapping):
+        return None
+    reason = _RESTRICTED_LABELS.get(label, "private or restricted (HTTP 403)")
+    return f"{fmt.listing_subreddit(d, desc_chars=600)}\nr/{d.get('display_name') or sr} is {reason}."
+
+
 @mcp.tool(annotations=READ_ONLY, title="Subreddit details, rules and wiki pages", output_schema=None)
 @deadline
 async def get_subreddit_info(
@@ -599,7 +683,13 @@ async def get_subreddit_info(
         sr = refs.normalize_subreddit(subreddit, allow_multi=False)
         side_n, s_note = clamp(sidebar_chars, 0, 50_000, "sidebar_chars")
         client = get_client()
-        about = await client.get(f"/r/{sr}/about")
+        try:
+            about = await client.get(f"/r/{sr}/about")
+        except Exception as exc:
+            limited = await _restricted_subreddit_info(sr, exc)
+            if limited:
+                return limited
+            raise
         if not isinstance(about, dict) or about.get("kind") != "t5":
             raise HTTPError(404, f"/r/{sr}/about")
         d = about.get("data") or {}
@@ -720,7 +810,9 @@ def _stub_summary(pid: str, s: fmt.CommentStats) -> str:
     so the line says how many are listed and how many sit inside the unshown comments.
     """
     expand = f'expand_comments(post="{pid}", comment_ids=[ids from the [more ...] lines])'
-    text = f"{s.stub_comments:,} more in {fmt.plural(s.stubs, 'stub')}"
+    # Reddit's stub counts include removed comments, so they are estimates.
+    approx = "~" if s.stub_comments else ""
+    text = f"{approx}{s.stub_comments:,} more in {fmt.plural(s.stubs, 'stub')}"
     if not s.hidden_stubs:
         if s.stubs:
             text += " -> " + expand
@@ -730,7 +822,7 @@ def _stub_summary(pid: str, s: fmt.CommentStats) -> str:
         if listed:
             parts.append(f"{fmt.plural(listed, 'stub')} listed with ids -> {expand}")
         parts.append(
-            f"{fmt.plural(s.hidden_stubs, 'stub')} ({s.hidden_stub_comments:,} comments) inside the "
+            f"{fmt.plural(s.hidden_stubs, 'stub')} (~{s.hidden_stub_comments:,} comments) inside the "
             "loaded comments not shown, ids not listed: expand those comments (ids below) or raise "
             "max_chars"
         )
@@ -746,16 +838,32 @@ def _stub_summary(pid: str, s: fmt.CommentStats) -> str:
     return text
 
 
+def _budget_line(pid: str, s: fmt.CommentStats, id_cap: int) -> str | None:
+    """Say what the budget cut: whole comment threads (by their top id) and unlisted stubs."""
+    if not (s.unshown_ids or s.pending_ids):
+        return None
+    parts = []
+    if s.unshown_ids:
+        parts.append(
+            f"{fmt.plural(s.unshown_comments, 'loaded comment')} in "
+            f"{fmt.plural(len(s.unshown_ids), 'thread')} not shown"
+        )
+    if s.pending_ids:
+        parts.append(f"{fmt.plural(len(s.pending_ids), 'stub id')} not listed")
+    ids = s.unshown_ids + s.pending_ids
+    return (
+        f"Output budget reached: {' and '.join(parts)}. "
+        f'expand_comments(post="{pid}", comment_ids=[{fmt.stub_ids(ids, id_cap)}]) '
+        "returns them, or call again with a larger max_chars"
+    )
+
+
 def _coverage(pid: str, total: Any, r: fmt.CommentRenderer, id_cap: int = 100) -> list[str]:
     s = r.stats
     lines = [f"Shown {s.shown} of {fmt.plural(total, 'comment')}; {_stub_summary(pid, s)}"]
-    if s.unshown_ids or s.pending_ids:
-        ids = s.unshown_ids + s.pending_ids
-        lines.append(
-            f"Output budget reached: {s.unshown_comments:,} loaded comments not shown. "
-            f'expand_comments(post="{pid}", comment_ids=[{fmt.stub_ids(ids, id_cap)}]) '
-            "returns them, or call again with a larger max_chars"
-        )
+    budget_line = _budget_line(pid, s, id_cap)
+    if budget_line:
+        lines.append(budget_line)
     return lines
 
 
@@ -867,13 +975,20 @@ async def get_post(
             sec = f"comments (sort={comment_sort}, limit={lim}, depth={dep}){notes}"
         sec += f"; comment link = {link}<id>/"
 
-        id_cap = _id_cap(budget, 100)
+        # Loaded comments come first: reserve room for short stub id lists only, render the
+        # comments, then let the top-level stub lines use whatever budget is left.
+        id_cap = _footer_id_cap(budget)
         root_stubs = [t.get("data") or {} for t in comments if t.get("kind") == "more"]
-        root_lines = _root_stub_lines(root_stubs, _id_cap(budget, fmt.MAX_STUB_IDS))
-        reserve = sum(len(x) + 1 for x in root_lines) + 600 + id_cap * 9
+        short_root = _root_stub_lines(root_stubs, MIN_STUB_IDS)
+        reserve = sum(len(x) + 1 for x in short_root) + FOOTER_RESERVE + id_cap * 9
         renderer = fmt.CommentRenderer(max_chars=budget - len(header) - len(sec) - reserve, focus=cid)
         renderer.walk(comments)
         body = renderer.text if renderer.parts else ("" if comments else "(no comments)")
+        root_lines = short_root
+        if root_stubs:
+            spare = budget - len(header) - len(sec) - len(body) - FOOTER_RESERVE - id_cap * 9
+            per_stub = min(_id_cap(budget, fmt.MAX_STUB_IDS), max(MIN_STUB_IDS, spare // 9 // len(root_stubs)))
+            root_lines = _root_stub_lines(root_stubs, per_stub)
         tail = "\n".join([*root_lines, "", *_coverage(pid, d.get("num_comments"), renderer, id_cap)])
         return _fit(f"{header}\n\n{sec}", body, tail, budget)
     except Exception as exc:
@@ -918,16 +1033,29 @@ async def expand_comments(
             got = await client.morechildren(pid, batch, sort)
             things.extend(got)
             est += sum(len(str((t.get("data") or {}).get("body") or "")) + 60 for t in got)
+        fetched = [x for x in ids if x not in set(remaining)]
+        returned = {
+            str((t.get("data") or {}).get("id"))
+            for t in things
+            if isinstance(t, Mapping) and t.get("kind") == "t1"
+        }
+        missing = [x for x in fetched if x not in returned]
+        missing_line = (
+            await _explain_missing_comments(pid, missing, _footer_id_cap(budget)) if missing else ""
+        )
         if not things:
-            return (
-                f"Reddit returned no comments for these ids in post {pid}: they were deleted, "
-                "or they belong to another post."
-            )
+            return f"Reddit returned no comments for these ids in post {pid}.\n{missing_line}"
         forest = fmt.build_morechildren_forest(things)
-        header = f"expanded {len(ids) - len(remaining)} ids in post {pid} (sort={sort}){_notes(m_note)}"
-        id_cap = _id_cap(budget, 100)
+        header = (
+            f"expanded {len(fetched)} ids in post {pid}: {len(fetched) - len(missing)} returned "
+            f"(sort={sort}){_notes(m_note)}"
+        )
+        id_cap = _footer_id_cap(budget)
         rest_cap = _id_cap(budget, 500)
-        reserve = 600 + id_cap * 9 + (min(len(remaining), rest_cap) * 9 if remaining else 0)
+        reserve = (
+            FOOTER_RESERVE + id_cap * 9 + len(missing_line)
+            + (min(len(remaining), rest_cap) * 9 if remaining else 0)
+        )
         renderer = fmt.CommentRenderer(max_chars=budget - len(header) - reserve, root_stubs_inline=True)
         for parent, group in forest:
             ptype, _, pval = parent.partition("_")
@@ -936,11 +1064,11 @@ async def expand_comments(
             renderer.walk(group)
         s = renderer.stats
         lines = ["", f"Shown {fmt.plural(s.shown, 'comment')}; {_stub_summary(pid, s)}"]
-        if s.unshown_ids or s.pending_ids:
-            lines.append(
-                f"Output budget reached: {s.unshown_comments:,} loaded comments not shown -> "
-                f'expand_comments(post="{pid}", comment_ids=[{fmt.stub_ids(s.unshown_ids + s.pending_ids, id_cap)}])'
-            )
+        budget_line = _budget_line(pid, s, id_cap)
+        if budget_line:
+            lines.append(budget_line)
+        if missing_line:
+            lines.append(missing_line)
         if remaining:
             lines.append(
                 f"Not fetched yet ({len(remaining)} ids) -> expand_comments(post=\"{pid}\", "
@@ -1014,6 +1142,12 @@ async def get_posts(
         if blocks:
             out.append("\n\n".join(blocks))
         tail = []
+        cut = [b.split("]", 1)[0].lstrip("[") for b in blocks if re.search(r" \[\+[\d,]+ chars\]", b)]
+        if cut and body < 40_000:
+            tail.append(
+                f"[+N chars] marks a cut body: get_posts(posts=[{', '.join(cut)}], body_chars=40000) "
+                "returns the whole text"
+            )
         if missing:
             tail.append(f"Not found (deleted, private or wrong id): {', '.join(missing)}")
         if unshown:
@@ -1071,12 +1205,17 @@ async def get_user_activity(
         if d.get("is_suspended"):
             return f"u/{name} is suspended; Reddit hides the profile and its history."
         timed = sort in ("top", "controversial")
+        # Always fetch a full page: the subreddit summary needs a real sample even when the
+        # caller asks for a few items. The cursor then points after the last item shown.
         root = await client.get(
-            f"/user/{name}/{kind}", sort=sort, t=time if timed else None, limit=n, after=cursor
+            f"/user/{name}/{kind}", sort=sort, t=time if timed else None, limit=100, after=cursor
         )
-        children, next_after = _listing_children(root)
+        sample, next_after = _listing_children(root)
+        children = sample[:n]
+        if len(sample) > n:
+            next_after = fmt.fullname(children[-1]) or next_after
         head = fmt.user_header(d, time_now())
-        summary = fmt.activity_summary(children)
+        summary = fmt.activity_summary(sample)
         header = f"{head}\n{summary}\n\n{kind} sort={sort}" + (f" time={time}" if timed else "")
         header += f": {len(children)} items" + _notes(n_note, b_note)
         empty = "No visible items (the account may have none, or hides its history)."

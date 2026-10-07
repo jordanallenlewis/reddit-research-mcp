@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 from reddit_research_mcp.reddit import Config, RedditClient
@@ -149,10 +150,19 @@ class FakeReddit(RedditClient):
         return item
 
 
-def run(coro: Any) -> Any:
+FOOTER = re.compile(r"\n\[\d+ Reddit requests?, [\d.]+ s\]$")
+
+
+def run_raw(coro: Any) -> Any:
     import asyncio
 
     return asyncio.run(coro)
+
+
+def run(coro: Any) -> Any:
+    """Run a tool coroutine and drop the request/time footer, so tests can check endings."""
+    out = run_raw(coro)
+    return FOOTER.sub("", out) if isinstance(out, str) else out
 
 
 Factory = Callable[..., Any]

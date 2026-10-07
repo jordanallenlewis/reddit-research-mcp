@@ -235,6 +235,11 @@ def parse_post_refs(raw: list[str] | str | None, *, arg: str = "posts") -> list[
 def normalize_username(raw: str | None, *, arg: str = "username") -> str:
     """Accept "name", "u/name", "/u/name", "@name" or a reddit.com/user/name URL."""
     s = (raw or "").strip()
+    if s.lower() in ("[deleted]", "[removed]", "u/[deleted]"):
+        raise InputError(
+            f"{s} is Reddit's placeholder for a deleted or removed author, not an account; "
+            "there is no profile or history to read"
+        )
     if s and _looks_like_url(s):
         host, path = _split_url(s)
         m = re.search(r"/(?:u|user)/([^/?#]+)", path, re.I)

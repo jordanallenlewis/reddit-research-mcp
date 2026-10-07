@@ -13,7 +13,7 @@ It never posts, votes, edits or deletes anything. Every tool is marked read-only
   expansion, bulk post bodies, user history and "other discussions" of a link.
 - Thread coverage is explicit: every "load more" stub that fits the response budget is listed
   with its comment ids, and each thread ends with
-  `Shown X of Y comments; Z more in N stubs -> expand_comments(...)`. When the budget cuts
+  `Shown X of Y comments; ~Z more in N stubs -> expand_comments(...)`. When the budget cuts
   comments, the line says how many stubs sit inside them and lists the cut comments' ids instead.
 - Compact text output: one header line per item with id, subreddit, UTC date, score, upvote
   ratio, comment count, author, flair, post type and flags. Every response has a size budget
@@ -94,12 +94,12 @@ claude mcp add --scope user reddit -- uv run --directory "$PWD" reddit-research-
 | `search_reddit(query, subreddit="", sort="relevance", time="all", limit=25, after=None, body_chars=400)` | Search post titles and bodies, site-wide or in `a+b` subreddits. Returns a `next: after=` cursor. | 1 |
 | `browse_subreddit(subreddit, listing="hot", time="week", limit=25, after=None, body_chars=400)` | `hot`, `new`, `top`, `rising` or `controversial` posts of one or more subreddits. `time` applies to top and controversial. | 1 |
 | `search_subreddits(query, limit=10)` | Find communities by description, plus names that start with the query, with subscribers, NSFW flag, creation date and description. | 2 to 3 |
-| `get_subreddit_info(subreddit, include_rules=True, include_sidebar=False, sidebar_chars=3000)` | Size, age, type, description, rules, sidebar and wiki page list. | 2 to 3 |
+| `get_subreddit_info(subreddit, include_rules=True, include_sidebar=False, sidebar_chars=3000)` | Size, age, type, description, rules, sidebar and wiki page list. For a private or Premium-only community it shows the public listing data and says what needs membership. | 2 to 3 |
 | `get_subreddit_wiki(subreddit, page="index", max_chars=20000)` | Read a wiki page (FAQs, guides), or list pages with `page=""`. | 1 |
 | `get_post(post, comment_sort="top", comment_limit=200, comment_depth=8, comment_id=None, context=0, body_chars=6000, max_chars=40000)` | The post and its comment tree in one request, with the "more" stubs and a coverage line. The body shows its first 6,000 characters by default so long posts leave room for comments; `get_posts(..., body_chars=40000)` returns the whole text. A `comment_id` that is not in the post is an error that says where the comment lives, when Reddit knows. | 1 (2 when a `comment_id` is not found) |
 | `expand_comments(post, comment_ids, sort="top", max_chars=40000)` | Load the comments behind "more" stubs, as reply trees. Up to 500 ids per call. | 1 per 100 ids |
 | `get_posts(posts, body_chars=4000, max_chars=60000)` | Full headers and bodies of many posts at once (no comments). | 1 per 100 posts |
-| `get_user_activity(username, kind="overview", sort="new", time="all", limit=25, after=None, body_chars=400)` | Account age and karma, recent posts and comments, and which subreddits the activity is concentrated in. | 2 |
+| `get_user_activity(username, kind="overview", sort="new", time="all", limit=25, after=None, body_chars=400)` | Account age and karma, recent posts and comments, and which subreddits the activity is concentrated in (from the last 100 items, whatever `limit` is). `[deleted]` is explained, not looked up. | 2 |
 | `find_other_discussions(post_or_url, limit=25)` | Crossposts and other submissions of a post's link, or every thread that submitted an external URL. | 1 to 2 |
 
 Limits are clamped to the ranges the tool descriptions state (for example `limit` 1 to 100,
@@ -135,14 +135,25 @@ Comments in `get_post` are indented by depth:
 [k2x9z9z] 2024-10-04 [removed]
 [more top-level: 1,552 comments; 540 ids: ...]
 
-Shown 180 of 2,849 comments; 2,669 more in 45 stubs -> expand_comments(post="1abc234", comment_ids=[ids from the [more ...] lines])
+Shown 180 of 2,849 comments; ~2,669 more in 45 stubs -> expand_comments(post="1abc234", comment_ids=[ids from the [more ...] lines])
+[1 Reddit request, 0.6 s]
 ```
+
+Stub counts carry a `~` because Reddit counts removed comments in them, so shown plus stub
+comments can add up to slightly more than the thread's comment count.
 
 When `max_chars` cuts the thread, stubs inside the comments that were not shown cannot be listed.
 The coverage line then splits the count, for example
-`2,468 more in 336 stubs: 50 stubs listed with ids -> expand_comments(...); 286 stubs (1,268 comments) inside the loaded comments not shown, ids not listed`,
-and the next line lists the ids of the comments that were not shown, which `expand_comments`
-accepts too. Raising `max_chars` or lowering `body_chars` shows more in one call.
+`~2,468 more in 336 stubs: 50 stubs listed with ids -> expand_comments(...); 286 stubs (~1,268 comments) inside the loaded comments not shown, ids not listed`,
+and the next line (`Output budget reached: 40 loaded comments in 12 threads not shown`) lists
+the top id of each cut thread, which `expand_comments` accepts too. Loaded comments take
+priority over stub id lists, so a small `max_chars` shortens the id lists first. Raising
+`max_chars` or lowering `body_chars` shows more in one call.
+
+`expand_comments` reports any requested id Reddit did not return, grouped by reason, for
+example `Not returned (2): removed: pc1uss9; not found: abc1234`.
+
+Every result ends with a line such as `[2 Reddit requests, 0.4 s]`.
 
 A comment's permalink is the post permalink plus the comment id; the thread header prints the
 template once instead of repeating it on every comment.
@@ -158,6 +169,7 @@ graphics and tipping. What works:
 - Require terms with `AND`: `dremio AND iceberg`.
 - Field operators: `subreddit:dataengineering`, `flair:Discussion`, `title:benchmark`,
   `selftext:kubernetes`, `author:name`, and `-subreddit:name` to exclude a community.
+  Product names attract job-bot spam; `-subreddit:jobboardsearch` removes most of it.
 - Search several communities in one call with `subreddit="dataengineering+dremio_lakehouse"`.
 - Reddit's API cannot search comment text. To find advice inside threads, search with
   `sort="comments"` (most discussed), then read the threads with `get_post` and expand stubs.

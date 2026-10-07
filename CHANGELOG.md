@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-07
+
+Fixes from a full live smoke test of every tool.
+
+### Fixed
+
+- `get_post` with a small `max_chars` printed long stub id lists and dropped comments it had
+  already loaded. Loaded comments now come first and the stub id lists are shortened instead.
+- `expand_comments` silently skipped ids Reddit did not return. It now lists them, grouped by
+  reason (removed, deleted, in another post, not found), using one lookup request.
+- The budget line said "N loaded comments not shown" next to fewer ids. It now reads
+  "N loaded comments in M threads not shown" and counts unlisted stub ids separately.
+- Stub comment counts are marked approximate (`~`), since Reddit includes removed comments.
+- `get_user_activity("[deleted]")` now explains the placeholder instead of rejecting the name.
+- `get_posts` now says how to read a cut body in full.
+- `get_subreddit_info` on a private or Premium-only community returns its public listing
+  data and what needs membership, instead of only an error.
+
+### Changed
+
+- `get_user_activity` builds its subreddit summary from the last 100 items in one request,
+  whatever `limit` is; the cursor continues after the last item shown.
+- Every result ends with the number of Reddit requests and the elapsed time.
+- The `search_reddit` description suggests `-subreddit:jobboardsearch` against job-bot spam.
+
 ## [0.1.0] - 2026-10-07
 
 First release as a package, rewritten from a single-file server based on
