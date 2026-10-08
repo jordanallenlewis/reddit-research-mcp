@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-08
+
+### Fixed
+
+- The `[N Reddit requests, ...]` footer counted requests from other tool calls running at the same
+  time (a client that sends several calls in parallel saw inflated counts). Each call now counts
+  only its own.
+- `get_posts` rejected the whole call when one entry was not a post id or link. It now skips
+  such entries, lists them (shortened, at most 10) and reads the rest. A call with no valid
+  entry is still an error.
+
 ## [0.2.1] - 2026-10-08
 
 ### Added

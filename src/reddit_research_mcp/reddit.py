@@ -13,6 +13,7 @@ client and the configuration are created on the first request.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import math
@@ -354,6 +355,12 @@ _NOT_JSON = object()
 # ---------------------------------------------------------------- client
 
 
+# Requests sent by the tool call running in this context. A tool call installs a fresh list, so the
+# count in its footer excludes requests from other calls running at the same time (a plain
+# before/after difference of request_count includes them).
+CALL_TALLY: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar("reddit_call_tally", default=None)
+
+
 class RedditClient:
     """Thin async Reddit API client: one place for auth, limits, retries and errors."""
 
@@ -525,6 +532,9 @@ class RedditClient:
             slept += await self._gate(MAX_RETRY_WAIT - slept)
             started = self.clock()
             self.request_count += 1
+            tally = CALL_TALLY.get()
+            if tally is not None:
+                tally[0] += 1
             limit = self.timeout if attempt == 0 else min(self.timeout, self.retry_timeout)
             try:
                 status, headers, body = await self._send_raw(verb, path, q, form, timeout=limit)

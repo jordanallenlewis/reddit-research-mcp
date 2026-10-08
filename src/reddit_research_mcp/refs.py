@@ -264,8 +264,7 @@ def parse_comment_ids(raw: list[str] | str | None, *, arg: str = "comment_ids") 
     return ids
 
 
-def parse_post_refs(raw: list[str] | str | None, *, arg: str = "posts") -> list[str]:
-    """Parse several post references into unique post ids, keeping order."""
+def _post_ref_items(raw: list[str] | str | None, arg: str) -> list[str]:
     items: list[str] = []
     if raw is None:
         raw = []
@@ -273,16 +272,45 @@ def parse_post_refs(raw: list[str] | str | None, *, arg: str = "posts") -> list[
         raw = [raw]
     for entry in raw:
         items.extend(p for p in re.split(r"[\s,]+", _clip(str(entry), arg, MAX_LIST_ENTRY_CHARS)) if p)
+    return items
+
+
+def parse_post_refs(raw: list[str] | str | None, *, arg: str = "posts") -> list[str]:
+    """Parse several post references into unique post ids, keeping order."""
+    ids, _ = parse_post_refs_lenient(raw, arg=arg, strict=True)
+    return ids
+
+
+def parse_post_refs_lenient(
+    raw: list[str] | str | None, *, arg: str = "posts", strict: bool = False
+) -> tuple[list[str], list[str]]:
+    """Like parse_post_refs, but entries that are not post references are returned, not raised.
+
+    Returns (unique post ids in order, rejected entries). One malformed entry no longer discards
+    the valid ones; when nothing valid is left, the error for the first rejected entry is raised
+    (as it is for every rejected entry when strict=True).
+    """
     out: list[str] = []
     seen: set[str] = set()
-    for item in items:
-        pid = parse_post_ref(item, arg=arg).post_id
+    rejected: list[str] = []
+    first_error: InputError | None = None
+    for item in _post_ref_items(raw, arg):
+        try:
+            pid = parse_post_ref(item, arg=arg).post_id
+        except InputError as exc:
+            if strict:
+                raise
+            first_error = first_error or exc
+            rejected.append(item)
+            continue
         if pid not in seen:
             seen.add(pid)
             out.append(pid)
     if not out:
+        if first_error is not None:
+            raise first_error
         raise InputError(f"{arg} is empty; pass post ids such as ['1abc234', '1def567']")
-    return out
+    return out, rejected
 
 
 # ---------------------------------------------------------------- users, wiki, urls

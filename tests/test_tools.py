@@ -711,3 +711,63 @@ def test_name_suggestions_drop_names_that_are_not_subreddit_names():
     with pytest.raises(ToolError, match="similar names: r/real_one$"):
         run(server.browse_subreddit(subreddit="realish"))
     assert [c for c in fake.calls if c[1] == "/api/info"][0][2]["sr_name"] == "real_one"
+
+
+# ---------------------------------------------------------------- lenient get_posts, per-call request counts
+
+
+def _info_ok(params):
+    return ok(listing([t3(id=x[3:], selftext="body") for x in params["id"].split(",")]))
+
+
+def test_get_posts_skips_an_invalid_entry_and_still_reads_the_valid_ones():
+    fake = FakeReddit({("GET", "/api/info"): _info_ok})
+    server.set_client(fake)
+    out = run(server.get_posts(posts=["abc123", "t1_zzz", "https://redd.it/def456", "not-a-post"], body_chars=0))
+    assert [c[2]["id"] for c in fake.calls] == ["t3_abc123,t3_def456"]
+    assert out.startswith("2 of 2 posts")
+    assert "[abc123]" in out and "[def456]" in out
+    assert "Skipped, not post ids or post links (2): 't1_zzz', 'not-a-post'" in out
+
+
+def test_get_posts_with_no_valid_entry_is_still_an_error():
+    fake = FakeReddit()
+    server.set_client(fake)
+    with pytest.raises(ToolError, match="not-a-post"):
+        run(server.get_posts(posts="not-a-post,t1_zzz"))
+    assert fake.calls == []
+
+
+def test_get_posts_skipped_list_is_short_and_one_line():
+    fake = FakeReddit({("GET", "/api/info"): _info_ok})
+    server.set_client(fake)
+    junk = ["t1_" + "q" * 500, "\x1b[31mred!", "next:after=evil"] + [f"bad{i}!" for i in range(12)]
+    out = run(server.get_posts(posts=["abc123", *junk], body_chars=0))
+    line = next(x for x in out.splitlines() if x.startswith("Skipped, not post ids"))
+    assert "(15)" in line and "and 5 more" in line
+    assert "\x1b" not in out
+    assert len(line) < 600
+    assert "q" * 100 not in line
+
+
+class _YieldingFake(FakeReddit):
+    """Gives other tool calls a turn between requests, so concurrent calls interleave."""
+
+    async def _send_raw(self, verb, path, params, data, timeout=None):  # type: ignore[override]
+        await asyncio.sleep(0)
+        return await super()._send_raw(verb, path, params, data, timeout=timeout)
+
+
+def test_request_count_in_footer_is_per_call_when_calls_overlap():
+    fake = _YieldingFake({("GET", "/api/info"): _info_ok})
+    server.set_client(fake)
+
+    async def both():
+        small = server.get_posts(posts=["a1"], body_chars=0)
+        big = server.get_posts(posts=[f"b{i}" for i in range(250)], body_chars=0)
+        return await asyncio.gather(small, big)
+
+    small, big = asyncio.run(both())
+    assert "\n[1 Reddit request," in small
+    assert "\n[3 Reddit requests," in big
+    assert fake.request_count == 4  # the client's own total is unchanged

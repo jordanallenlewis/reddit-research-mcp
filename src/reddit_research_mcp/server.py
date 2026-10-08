@@ -20,6 +20,7 @@ from pydantic import Field
 from . import __version__, refs
 from . import format as fmt
 from .reddit import (
+    CALL_TALLY,
     INFO_BATCH,
     MORECHILDREN_BATCH,
     AuthError,
@@ -81,30 +82,28 @@ def _elapsed(start: float) -> float:
     return time.monotonic() - start
 
 
-def _requests_sent() -> int:
-    return _client.request_count if _client is not None else 0
-
-
 def deadline(fn: Any) -> Any:
     """Bound a tool call by TOOL_DEADLINE seconds and report a timeout as a ToolError."""
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        before = _requests_sent()
+        tally = [0]  # this call's own requests; calls running at the same time do not add to it
+        token = CALL_TALLY.set(tally)
         started = time.monotonic()
         try:
-            result = await asyncio.wait_for(fn(*args, **kwargs), TOOL_DEADLINE)
-        except TimeoutError:
-            sent = max(0, _requests_sent() - before)
-            raise ToolError(
-                f"{fn.__name__} gave up after {TOOL_DEADLINE:g} s: Reddit is slow or not answering "
-                f"({fmt.plural(sent, 'request')} sent in this call, nothing returned). Retry in a "
-                "minute, or ask for less (smaller limit, fewer ids)."
-            ) from None
-        if isinstance(result, str):
-            sent = max(0, _requests_sent() - before)
-            result += f"\n[{fmt.plural(sent, 'Reddit request')}, {_elapsed(started):.1f} s]"
-        return result
+            try:
+                result = await asyncio.wait_for(fn(*args, **kwargs), TOOL_DEADLINE)
+            except TimeoutError:
+                raise ToolError(
+                    f"{fn.__name__} gave up after {TOOL_DEADLINE:g} s: Reddit is slow or not answering "
+                    f"({fmt.plural(tally[0], 'request')} sent in this call, nothing returned). Retry in a "
+                    "minute, or ask for less (smaller limit, fewer ids)."
+                ) from None
+            if isinstance(result, str):
+                result += f"\n[{fmt.plural(tally[0], 'Reddit request')}, {_elapsed(started):.1f} s]"
+            return result
+        finally:
+            CALL_TALLY.reset(token)
 
     return wrapper
 
@@ -1307,10 +1306,11 @@ async def get_posts(
 
     Use it after a search to read the complete text of the promising hits, then open the
     best threads with get_post for their comments. Missing or deleted posts are listed;
-    posts that do not fit the budget are listed for a follow-up call.
+    entries that are not post ids or links are skipped and listed; posts that do not fit
+    the budget are listed for a follow-up call.
     """
     try:
-        ids = refs.parse_post_refs(posts)
+        ids, skipped = refs.parse_post_refs_lenient(posts)
         notes = []
         over_cap: list[str] = []
         if len(ids) > GET_POSTS_MAX_IDS:
@@ -1387,6 +1387,10 @@ async def get_posts(
                 f"Stopped after {MULTI_REQUEST_SECONDS:.0f} s; not fetched ({len(unfetched)}): "
                 f"get_posts(posts=[{', '.join(unfetched)}])"
             )
+        if skipped:
+            shown = ", ".join(repr(clip(fmt.flatten(x), 40)) for x in skipped[:10])
+            more = f" and {len(skipped) - 10} more" if len(skipped) > 10 else ""
+            tail.append(f"Skipped, not post ids or post links ({len(skipped)}): {shown}{more}")
         if tail:
             out.append("\n".join(tail))
         return "\n\n".join(out)

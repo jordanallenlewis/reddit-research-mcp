@@ -114,7 +114,7 @@ claude mcp add --scope user reddit -- uv run --directory "$PWD" reddit-research-
 | `get_subreddit_wiki(subreddit, page="index", max_chars=20000)` | Read a wiki page (FAQs, guides), or list pages with `page=""`. | 2 (1 with `include_nsfw=true`) |
 | `get_post(post, comment_sort="top", comment_limit=200, comment_depth=8, comment_id=None, context=0, body_chars=6000, max_chars=40000)` | The post and its comment tree in one request, with the "more" stubs and a coverage line. The body shows its first 6,000 characters by default so long posts leave room for comments; `get_posts(..., body_chars=40000)` returns the whole text. A `comment_id` that is not in the post is an error that says where the comment lives, when Reddit knows. | 1 (2 when a `comment_id` is not found) |
 | `expand_comments(post, comment_ids, sort="top", max_chars=40000)` | Load the comments behind "more" stubs, as reply trees. Up to 500 ids per call; the rest are listed for the next call. | 1 per 100 ids, plus 1 for the NSFW check unless `include_nsfw=true`, plus 1 when ids come back missing |
-| `get_posts(posts, body_chars=4000, max_chars=60000)` | Full headers and bodies of many posts at once (no comments). Up to 300 posts per call; the rest are listed. | 1 per 100 posts |
+| `get_posts(posts, body_chars=4000, max_chars=60000)` | Full headers and bodies of many posts at once (no comments). Up to 300 posts per call; the rest are listed. An entry that is not a post id or link is skipped and listed, and the valid ones are still read. | 1 per 100 posts |
 | `get_user_activity(username, kind="overview", sort="new", time="all", limit=25, after=None, body_chars=400)` | Account age and karma, recent posts and comments, and which subreddits the activity is concentrated in (from the last 100 items, whatever `limit` is). `[deleted]` is explained, not looked up. | 2 |
 | `find_other_discussions(post_or_url, limit=25)` | Crossposts and other submissions of a post's link, or every thread that submitted an external URL. | 1 to 2 |
 
@@ -176,7 +176,7 @@ priority over stub id lists, so a small `max_chars` shortens the id lists first.
 `expand_comments` reports any requested id Reddit did not return, grouped by reason, for
 example `Not returned (2): removed: pc1uss9; not found: abc1234`.
 
-Every result ends with a line such as `[2 Reddit requests, 0.4 s]`.
+Every result ends with a line such as `[2 Reddit requests, 0.4 s]`. The count is that call's own requests, even when several tool calls run at once.
 
 A comment's permalink is the post permalink plus the comment id; the thread header prints the
 template once instead of repeating it on every comment.
