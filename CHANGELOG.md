@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.2.1] - 2026-10-08
+
+### Added
+
+- Input length limits that fail fast with a message and no Reddit request: `search_subreddits`
+  queries over 512 characters and `find_other_discussions` URLs over 2,048 characters.
+- `get_posts` lists the ids beyond its 300-id limit instead of only counting them.
+- README: example prompts, a comparison with built-in web search, a note that anonymous mode
+  shares one client id's quota worldwide, and the `include_nsfw` parameter note under the tools table.
+- Tests for annotations, GET-only requests, oversized and hostile input, and hostile Reddit values.
+
+### Changed
+
+- Error messages shorten long echoed input (keeping its start and the advice at the end), so a
+  100,000 character argument no longer produces a 100,000 character error.
+- Tool descriptions: clearer `listing`, `sort` and `context` parameters, "when to use which"
+  guidance for `browse_subreddit`, `search_subreddits`, `get_subreddit_info`, `get_user_activity`
+  and `expand_comments`.
+
+### Fixed
+
+- `expand_comments` with thousands of ids spent seconds rebuilding a set per id, and dropped the
+  "Not fetched yet" id list when Reddit returned no comments at all.
+- Wiki page names, the wiki revision author, a community's accepted post types and Reddit's
+  `after` cursor are now flattened or validated before they are printed, so a hostile value cannot
+  add lines (such as a fake `next:` line) to the output.
+- Names that Reddit returns (a community's `display_name`, a user's `name`, a comment's `link_id`,
+  names from the community-name lookup) no longer choose a request path or a suggested call.
+  `get_subreddit_info` and `get_user_activity` keep the validated input for later requests and
+  use the returned name only for display, and only when it matches the requested one.
+- README request counts for `get_subreddit_wiki`, `expand_comments`, `search_subreddits` and
+  `get_subreddit_info`, and the Troubleshooting text for network and timeout errors.
+
 ## [0.2.0] - 2026-10-07
 
 ### Added

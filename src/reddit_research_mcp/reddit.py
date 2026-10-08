@@ -17,7 +17,9 @@ import json
 import logging
 import math
 import os
+import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
 from email.utils import parsedate_to_datetime
@@ -36,6 +38,31 @@ MAX_RETRY_WAIT = 15.0  # longest wait we accept before retrying a 429 or an exha
 RETRY_BACKOFF = 1.0  # pause before the single retry of a transport error or 5xx
 MORECHILDREN_BATCH = 100  # Reddit's limit per /api/morechildren call
 INFO_BATCH = 100  # Reddit's limit per /api/info call
+MAX_BODY_BYTES = 16 * 1024 * 1024  # larger (decoded) responses are dropped, not parsed
+MAX_RESET_SECONDS = 3600.0  # ceiling for any rate-limit wait a header can ask for
+
+
+# ---------------------------------------------------------------- redaction
+
+_SECRETS: set[str] = set()  # configured credential values, scrubbed from any error text
+_BEARER = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_URL = re.compile(r"https?://[^\s'\"<>]+")
+
+
+def _scrub_url(m: re.Match[str]) -> str:
+    """Keep scheme, host and path; drop userinfo, query string and fragment."""
+    scheme, _, rest = m.group(0).partition("://")
+    rest = rest.split("?", 1)[0].split("#", 1)[0]
+    host, sep, path = rest.partition("/")
+    return f"{scheme}://{host.rsplit('@', 1)[-1]}{sep}{path}"
+
+
+def redact(text: str) -> str:
+    """Defence in depth for text that may reach a log or a tool response."""
+    for secret in _SECRETS:
+        text = text.replace(secret, "[redacted]")
+    text = _BEARER.sub(lambda m: f"{m.group(1)} [redacted]", text)
+    return _URL.sub(_scrub_url, text)
 
 
 # ---------------------------------------------------------------- errors
@@ -62,7 +89,9 @@ class AuthError(RedditAPIError):
 
 class RateLimitedError(RedditAPIError):
     def __init__(self, retry_after: float, detail: str = "") -> None:
-        self.retry_after = max(1, math.ceil(retry_after))
+        if not math.isfinite(retry_after):
+            retry_after = 60.0
+        self.retry_after = max(1, math.ceil(min(retry_after, MAX_RESET_SECONDS)))
         msg = f"Reddit rate limit reached; retry after {self.retry_after} s."
         if detail:
             msg += f" {detail}"
@@ -102,6 +131,10 @@ class HTTPError(RedditAPIError):
         super().__init__(msg)
 
 
+class ResponseTooLargeError(RedditAPIError):
+    """The response body exceeded MAX_BODY_BYTES and was dropped unparsed."""
+
+
 class RedditLabelError(RedditAPIError):
     """Reddit answered with a labelled error such as private, banned or WIKI_DISABLED."""
 
@@ -121,10 +154,13 @@ class RedditLabelError(RedditAPIError):
 @dataclass(frozen=True)
 class Config:
     mode: str  # "anonymous", "app" (client credentials) or "user" (refresh token)
-    client_id: str = ""
+    client_id: str = field(default="", repr=False)
     client_secret: str = field(default="", repr=False)
     refresh_token: str = field(default="", repr=False)
     user_agent: str = DEFAULT_USER_AGENT
+
+    def __post_init__(self) -> None:
+        _SECRETS.update(v for v in (self.client_id, self.client_secret, self.refresh_token) if len(v) >= 4)
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -160,14 +196,43 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             "REDDIT_CLIENT_SECRET is set but REDDIT_CLIENT_ID is not. Set both, or unset "
             "REDDIT_CLIENT_SECRET to use anonymous access."
         )
-    if ua and (len(ua) > 256 or "\n" in ua or "\r" in ua):
-        raise ConfigError("REDDIT_USER_AGENT must be a single line of at most 256 characters.")
+    if ua and (len(ua) > 256 or not ua.isascii() or not ua.isprintable()):
+        raise ConfigError(
+            "REDDIT_USER_AGENT must be a single line of printable ASCII, at most 256 characters."
+        )
     return Config(mode, cid, secret, refresh, ua or DEFAULT_USER_AGENT)
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+async def _limit_body(response: Any) -> None:
+    """httpx response hook: read the body in chunks and stop at MAX_BODY_BYTES (decoded)."""
+    declared = response.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        raise _BodyTooLarge
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.aiter_bytes():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            raise _BodyTooLarge
+        chunks.append(chunk)
+    response._content = b"".join(chunks)  # what httpx's own aread() would have stored
+
+
+def _new_async_client(transport: Any = None) -> Any:
+    import httpx
+
+    # httpx logs every request URL, query string included, at INFO.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    return httpx.AsyncClient(transport=transport, event_hooks={"response": [_limit_body]})
 
 
 def _build_http(cfg: Config) -> Any:
     """Assemble redditwarp's OAuth + httpx stack without its RateLimited handler."""
-    import httpx
     from redditwarp.auth import grants
     from redditwarp.core import grants as core_grants
     from redditwarp.core.authorizer_ASYNC import Authorized, Authorizer
@@ -179,14 +244,12 @@ def _build_http(cfg: Config) -> Any:
     from redditwarp.http.misc_handlers.apply_params_and_headers_ASYNC import ApplyDefaultHeaders
     from redditwarp.http.transport.impls.httpx_ASYNC import HttpxConnector
     from redditwarp.http.util.case_insensitive_dict import CaseInsensitiveDict
-    from redditwarp.util.redditwarp_installed_client_credentials import (
-        get_device_id,
-        get_redditwarp_client_id,
-    )
+    from redditwarp.util.redditwarp_installed_client_credentials import get_redditwarp_client_id
 
     if cfg.mode == "anonymous":
         creds = (get_redditwarp_client_id(), "")
-        grant: Any = core_grants.InstalledClientGrant(get_device_id())
+        # redditwarp's own get_device_id() is uuid1(), which embeds this machine's MAC address.
+        grant: Any = core_grants.InstalledClientGrant(uuid.uuid4().hex[:30])
     elif cfg.mode == "app":
         creds = (cfg.client_id, cfg.client_secret)
         grant = grants.ClientCredentialsGrant()
@@ -194,7 +257,7 @@ def _build_http(cfg: Config) -> Any:
         creds = (cfg.client_id, cfg.client_secret)
         grant = grants.RefreshTokenGrant(cfg.refresh_token)
 
-    connector = HttpxConnector(httpx.AsyncClient())
+    connector = HttpxConnector(_new_async_client())
     headers = CaseInsensitiveDict({"User-Agent": cfg.user_agent})
     token_http = HTTPClient(ApplyDefaultHeaders(connector, headers))
     token_http.timeout = REQUEST_TIMEOUT
@@ -231,6 +294,17 @@ def _header(headers: Mapping[str, str] | None, name: str) -> str:
     return str(v)
 
 
+def _exception_text(exc: BaseException) -> str:
+    """str(exc), except that Reddit's free-text OAuth error_description is dropped."""
+    try:
+        from redditwarp.auth.exceptions import OAuth2ResponseError
+    except ImportError:  # pragma: no cover
+        OAuth2ResponseError = ()  # type: ignore[assignment,misc]  # noqa: N806
+    if isinstance(exc, OAuth2ResponseError):
+        return re.sub(r"[^\w.-]", "", exc.error_name or "")[:40]
+    return str(exc).strip()
+
+
 def describe_exception(exc: BaseException) -> str:
     """Never-empty description: redditwarp raises transport errors with no message."""
     seen: set[int] = set()
@@ -238,32 +312,39 @@ def describe_exception(exc: BaseException) -> str:
     parts: list[str] = []
     while cur is not None and id(cur) not in seen and len(parts) < 3:
         seen.add(id(cur))
-        text = str(cur).strip()
-        parts.append(f"{type(cur).__name__}: {text}" if text else type(cur).__name__)
+        text = _exception_text(cur)
+        parts.append(f"{type(cur).__name__}: {text[:300]}" if text else type(cur).__name__)
         cur = cur.__cause__ or cur.__context__
-    return " <- ".join(parts)
+    return redact(" <- ".join(parts))
+
+
+def _finite(value: str) -> float | None:
+    try:
+        v = float(value)
+    except ValueError:
+        return None
+    return v if math.isfinite(v) else None
 
 
 def _parse_retry_after(headers: Mapping[str, str], now_wall: float | None = None) -> float:
+    """Seconds to wait: Retry-After, else x-ratelimit-reset, else 60; always finite, 0..MAX_RESET_SECONDS."""
     ra = _header(headers, "retry-after").strip()
     if ra:
-        try:
-            return max(0.0, float(ra))
-        except ValueError:
+        v = _finite(ra)
+        if v is None:
             try:
                 dt = parsedate_to_datetime(ra)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 now = now_wall if now_wall is not None else time.time()
-                return max(0.0, dt.timestamp() - now)
-            except (TypeError, ValueError, IndexError):
-                pass
-    reset = _header(headers, "x-ratelimit-reset").strip()
-    if reset:
-        try:
-            return max(0.0, float(reset))
-        except ValueError:
-            pass
+                v = dt.timestamp() - now
+            except (TypeError, ValueError, IndexError, OverflowError, OSError):
+                v = None
+        if v is not None:
+            return min(max(0.0, v), MAX_RESET_SECONDS)
+    reset = _finite(_header(headers, "x-ratelimit-reset").strip())
+    if reset is not None:
+        return min(max(0.0, reset), MAX_RESET_SECONDS)
     return 60.0
 
 
@@ -316,38 +397,41 @@ class RedditClient:
         return {"remaining": self._remaining, "reset_in": wait, "used": self._used}
 
     def _note_limits(self, headers: Mapping[str, str]) -> None:
-        rem = _header(headers, "x-ratelimit-remaining")
-        reset = _header(headers, "x-ratelimit-reset")
-        used = _header(headers, "x-ratelimit-used")
-        try:
-            if rem and reset:
-                self._remaining = float(rem)
-                self._reset_at = self.clock() + float(reset)
-            if used:
-                self._used = int(float(used))
-        except ValueError:
-            pass
+        """Track the quota window; garbled or non-finite values are ignored as a set."""
+        rem = _finite(_header(headers, "x-ratelimit-remaining"))
+        reset = _finite(_header(headers, "x-ratelimit-reset"))
+        used = _finite(_header(headers, "x-ratelimit-used"))
+        if rem is not None and reset is not None:
+            self._remaining = max(0.0, rem)
+            self._reset_at = self.clock() + min(max(0.0, reset), MAX_RESET_SECONDS)
+        if used is not None:
+            self._used = int(used)
 
-    async def _gate(self) -> None:
-        """Spend one request from the window, waiting briefly or failing fast when it is empty."""
+    async def _gate(self, max_wait: float = MAX_RETRY_WAIT) -> float:
+        """Spend one request from the window; wait up to max_wait s or fail fast when it is empty.
+
+        Returns the seconds slept. There is no await between reading and updating the
+        counters except the sleep, so concurrent tool calls cannot interleave mid-update.
+        """
         if self._remaining is None:
-            return
+            return 0.0
         now = self.clock()
         if now >= self._reset_at:
             self._remaining = None
-            return
+            return 0.0
         if self._remaining < 1:
             wait = self._reset_at - now
-            if wait <= MAX_RETRY_WAIT:
+            if wait <= max_wait:
                 await self.sleep(wait)
                 self._remaining = None
-                return
+                return wait
             raise RateLimitedError(
                 wait,
                 "The request window is used up (Reddit allows about 100 requests per minute "
                 "per client; anonymous clients share a quota).",
             )
         self._remaining -= 1
+        return 0.0
 
     # -- transport
 
@@ -367,8 +451,14 @@ class RedditClient:
         return resp.status, resp.headers, resp.data
 
     def _auth_failure(self, exc: BaseException) -> RedditAPIError:
+        from redditwarp.core.exceptions import BlacklistedUserAgent, FaultyUserAgent
         from redditwarp.http.exceptions import StatusCodeException
 
+        if isinstance(exc, (BlacklistedUserAgent, FaultyUserAgent)):
+            return AuthError(
+                f"Reddit's token endpoint rejects this User-Agent ({exc}). Change or unset "
+                "REDDIT_USER_AGENT."
+            )
         detail = describe_exception(exc)
         mode = self._config.mode if self._config else "anonymous"
         status = getattr(exc, "status_code", None)
@@ -418,12 +508,21 @@ class RedditClient:
         from redditwarp.http.exceptions import StatusCodeException, TimeoutException
         from redditwarp.http.exceptions import TransportError as RWTransportError
 
+        if (
+            not path.startswith("/")
+            or path.startswith("//")
+            or any(c in path for c in "?#\\ \t\r\n")
+            or ".." in path.split("/")
+        ):
+            # Would escape the API origin or hide a query string from the log; nothing is sent.
+            raise HTTPError(404, "<invalid path>", reason="invalid request path")
         q = {k: str(v) for k, v in (params or {}).items() if v is not None and v != ""}
         q.setdefault("raw_json", "1")
         form = None if data is None else {k: str(v) for k, v in data.items() if v is not None}
 
+        slept = 0.0  # rate-limit waiting so far; all of it together stays within MAX_RETRY_WAIT
         for attempt in (0, 1):
-            await self._gate()
+            slept += await self._gate(MAX_RETRY_WAIT - slept)
             started = self.clock()
             self.request_count += 1
             limit = self.timeout if attempt == 0 else min(self.timeout, self.retry_timeout)
@@ -441,6 +540,13 @@ class RedditClient:
                     f"{limit:.0f} s on a retry). Retry later, or ask for less (smaller limit)."
                 ) from exc
             except RWTransportError as exc:
+                if isinstance(exc.__cause__, _BodyTooLarge):
+                    log.debug("%s %s response over %d bytes dropped", verb, path, MAX_BODY_BYTES)
+                    raise ResponseTooLargeError(
+                        f"Reddit's response for {path} was larger than "
+                        f"{MAX_BODY_BYTES // (1024 * 1024)} MiB and was discarded; ask for less "
+                        "(smaller limit)."
+                    ) from exc
                 log.debug("%s %s transport error %s", verb, path, describe_exception(exc))
                 if attempt == 0:
                     await self.sleep(RETRY_BACKOFF)
@@ -472,16 +578,26 @@ class RedditClient:
             )
             if status == 429:
                 wait = _parse_retry_after(headers)
-                if attempt == 0 and wait <= MAX_RETRY_WAIT:
+                if attempt == 0 and wait <= MAX_RETRY_WAIT - slept:
                     await self.sleep(max(wait, 0.5))
+                    slept += max(wait, 0.5)
                     self._remaining = None  # waited as asked; let the retry through the gate
                     continue
                 raise RateLimitedError(wait)
+            if status == 401 and attempt == 0 and self._drop_token():
+                continue  # the token may have been revoked; fetch a fresh one once
             if status >= 500 and attempt == 0:
                 await self.sleep(RETRY_BACKOFF)
                 continue
             return self._decode(status, headers, body, path)
         raise RedditAPIError(f"Request to {path} failed after a retry")  # pragma: no cover
+
+    def _drop_token(self) -> bool:
+        """Forget the cached access token so the next request fetches a new one."""
+        if self._http is None:
+            return False
+        self._http.authorizer.set_token(None)
+        return True
 
     def _decode(self, status: int, headers: Mapping[str, str], body: bytes, path: str) -> Any:
         ctype = _header(headers, "content-type")
@@ -489,12 +605,12 @@ class RedditClient:
         if body:
             try:
                 parsed = json.loads(body.decode("utf-8", "replace"))
-            except ValueError:
+            except (ValueError, RecursionError):  # RecursionError: absurdly nested JSON
                 parsed = _NOT_JSON
         if 200 <= status < 300:
-            if parsed is _NOT_JSON:
+            if parsed is _NOT_JSON or not isinstance(parsed, (dict, list)):
                 raise RedditAPIError(
-                    f"Reddit returned a non-JSON response for {path} "
+                    f"Reddit returned a non-JSON or empty response for {path} "
                     f"(HTTP {status}, {ctype or 'no content type'}); retry, and report it if "
                     "it persists."
                 )

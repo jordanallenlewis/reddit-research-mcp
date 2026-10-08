@@ -36,17 +36,60 @@ def date_str(utc: Any) -> str:
         return "????-??-??"
 
 
+# Every code point a line-oriented reader (str.splitlines, a terminal, a log shipper) may treat
+# as a line break: CR, VT, FF, FS/GS/RS, NEL, LS, PS.
+_LINE_BREAKS = re.compile("\r\n|[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+# C0/C1 controls (incl. ESC, so ANSI sequences go inert), invisible characters used to hide a
+# fake line start, bidi overrides, and lone surrogates (which cannot be encoded as UTF-8).
+_STRIPPED = re.compile(
+    "[\x00-\x08\x0e-\x1b\x1f\x7f-\x84\x86-\x9f\u00ad\u200b\u2060\ufeff"
+    "\u202a-\u202e\u2066-\u2069\ud800-\udfff]"
+)
+# Lines that would pass as this server's own structure (headers, cursors, coverage lines, footers,
+# section labels) when they come from Reddit text. Matched after leading blanks, case-sensitive.
+_LOOKALIKE = re.compile(
+    r"^([ \t]*)(?="
+    r"\[[^\]\s]*\][ \t]+(?:r/\S*[ \t]+)?(?:\d{3,4}|\?{4})-|\[[^\]\s]*\][ \t]+\("  # [id] [r/sub] date | [id] (..)
+    r"|\[(?:more\b|continue\b|truncated\b|[\d,]+ Reddit|\+\d)"  # [more: ..] [continue: ..] [N Reddit requests, ..]
+    r"|next:|Shown[ \t]+\d|Output budget|sidebar \(\d|\(body cut|\(no comments\)|\(\w+ item not rendered"
+    r"|comments[ \t]+(?:\(|around)|Activity(?: by subreddit)?[ \t]*[:(]"
+    r"|(?:title|body|permalink|url|video|gallery|poll|captions|original title|description|profile|flags):"
+    r"|body[ \t]+\(from the original post\):|crosspost of[ \t]+\["
+    r"|[ru]/\S+[ \t]+(?:[\d,?]+ subscribers|created[ \t]+\d|is[ \t]))",
+    re.M,
+)
+
+
+def sanitize(text: Any) -> str:
+    """Reddit text with line breaks unified to ``\\n`` and control/invisible characters removed."""
+    return _STRIPPED.sub("", _LINE_BREAKS.sub("\n", str(text or "")))
+
+
+def defang(text: str) -> str:
+    """Backslash-escape any line that starts like this server's own structure (see _LOOKALIKE)."""
+    return _LOOKALIKE.sub(lambda m: m.group(1) + "\\", text)
+
+
 def clean_text(text: Any, *, keep_blank_lines: bool = True) -> str:
-    """Normalise newlines and trim; optionally drop blank lines between paragraphs."""
-    s = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    """Normalise newlines and trim; optionally drop blank lines between paragraphs.
+
+    Lines that imitate output structure (a fake header, cursor or coverage line) are
+    escaped with a leading backslash; everything else is kept verbatim.
+    """
+    s = sanitize(text)
     s = re.sub(r"[ \t]+\n", "\n", s)
     s = re.sub(r"\n{3,}", "\n\n", s) if keep_blank_lines else re.sub(r"\n{2,}", "\n", s)
-    return s.strip()
+    return defang(s.strip())
 
 
 def flatten(text: Any) -> str:
-    """Collapse all whitespace (including newlines) to single spaces."""
-    return re.sub(r"\s+", " ", str(text or "")).strip()
+    """Collapse all whitespace (including every kind of line break) to single spaces."""
+    return re.sub(r"\s+", " ", sanitize(text)).strip()
+
+
+def line_text(text: Any) -> str:
+    """flatten() for text that starts a line: also escapes a start that imitates structure."""
+    return defang(flatten(text))
 
 
 def truncate(text: str, limit: int) -> str:
@@ -85,7 +128,7 @@ def plural(n: Any, word: str) -> str:
 
 
 def permalink(d: Mapping[str, Any]) -> str:
-    p = str(d.get("permalink") or "")
+    p = flatten(d.get("permalink"))
     if not p:
         return ""
     return p if p.startswith("http") else REDDIT + p
@@ -94,13 +137,13 @@ def permalink(d: Mapping[str, Any]) -> str:
 def fullname(thing: Mapping[str, Any]) -> str:
     d = thing.get("data") or {}
     if d.get("name"):
-        return str(d["name"])
-    kind = thing.get("kind") or ""
-    return f"{kind}_{d.get('id', '')}" if kind and d.get("id") else ""
+        return flatten(d["name"])
+    kind = flatten(thing.get("kind"))
+    return f"{kind}_{flatten(d.get('id'))}" if kind and d.get("id") else ""
 
 
 def author_str(d: Mapping[str, Any]) -> str:
-    a = d.get("author") or "[deleted]"
+    a = flatten(d.get("author")) or "[deleted]"
     return "[deleted]" if a == "[deleted]" else f"u/{a}"
 
 
@@ -125,8 +168,8 @@ def post_kind(d: Mapping[str, Any]) -> str:
         return "gallery"
     if d.get("is_self"):
         return "self"
-    hint = str(d.get("post_hint") or "")
-    url = str(d.get("url_overridden_by_dest") or d.get("url") or "")
+    hint = flatten(d.get("post_hint"))
+    url = flatten(d.get("url_overridden_by_dest") or d.get("url"))
     if d.get("is_video") or hint in ("hosted:video", "rich:video") or "v.redd.it" in url:
         return "video"
     if hint == "image" or "i.redd.it" in url or re.search(r"\.(jpe?g|png|gif|webp)(\?|$)", url, re.I):
@@ -148,14 +191,14 @@ def post_flags(d: Mapping[str, Any], *, full: bool = False) -> list[str]:
         out.append("locked")
     cat = d.get("removed_by_category")
     if cat:
-        out.append("deleted" if cat == "deleted" else f"removed({cat})")
+        out.append("deleted" if cat == "deleted" else f"removed({flatten(cat)})")
     elif d.get("selftext") == "[removed]":
         out.append("removed")
     if d.get("edited"):
         out.append("edited")
     dist = d.get("distinguished")
     if dist:
-        out.append("mod" if dist == "moderator" else str(dist))
+        out.append("mod" if dist == "moderator" else flatten(dist))
     if d.get("hide_score"):
         # The subreddit hides scores of new posts on its site; the API still sends the number.
         out.append("score-hidden")
@@ -185,8 +228,8 @@ def score_str(d: Mapping[str, Any], *, with_ratio: bool = True) -> str:
 
 def post_head(d: Mapping[str, Any], *, full: bool = False, omit_author: bool = False) -> str:
     parts = [
-        f"[{d.get('id', '?')}]",
-        f"r/{d.get('subreddit', '?')}",
+        f"[{flatten(d.get('id', '?'))}]",
+        f"r/{flatten(d.get('subreddit', '?'))}",
         date_str(d.get("created_utc")),
         score_str(d),
         f"{num(d.get('num_comments'))}c",
@@ -211,8 +254,8 @@ def _origin(d: Mapping[str, Any]) -> Mapping[str, Any]:
 def _origin_id(d: Mapping[str, Any]) -> str:
     o = _origin(d)
     if o.get("id"):
-        return str(o["id"])
-    parent = str(d.get("crosspost_parent") or "")
+        return flatten(o["id"])
+    parent = flatten(d.get("crosspost_parent"))
     return parent.removeprefix("t3_") or "?"
 
 
@@ -247,15 +290,15 @@ def _poll_line(d: Mapping[str, Any]) -> str:
 
 
 def _video_line(d: Mapping[str, Any]) -> str:
-    url = str(d.get("url_overridden_by_dest") or d.get("url") or "")
+    url = flatten(d.get("url_overridden_by_dest") or d.get("url"))
     rv = ((d.get("media") or {}) if isinstance(d.get("media"), Mapping) else {}).get("reddit_video")
     if isinstance(rv, Mapping) and rv.get("duration"):
-        return f"video: {url} ({rv.get('duration')} s)"
+        return f"video: {url} ({flatten(rv.get('duration'))} s)"
     return f"video: {url}"
 
 
 def _link_line(d: Mapping[str, Any], kind: str) -> str:
-    url = str(d.get("url_overridden_by_dest") or d.get("url") or "")
+    url = flatten(d.get("url_overridden_by_dest") or d.get("url"))
     if kind == "video":
         return _video_line(d)
     if kind == "gallery":
@@ -264,12 +307,12 @@ def _link_line(d: Mapping[str, Any], kind: str) -> str:
         return _poll_line(d)
     if kind == "crosspost":
         o = _origin(d)
-        line = f"crosspost of [{_origin_id(d)}] r/{o.get('subreddit', '?')}"
+        line = f"crosspost of [{_origin_id(d)}] r/{flatten(o.get('subreddit', '?'))}"
         if o:
             line += f" {author_str(o)} {date_str(o.get('created_utc'))}"
             okind = post_kind(o)
             if okind not in ("self", "poll", "post"):
-                line += f" {okind}: {o.get('url_overridden_by_dest') or o.get('url') or ''}".rstrip()
+                line += f" {okind}: {flatten(o.get('url_overridden_by_dest') or o.get('url'))}".rstrip()
         return line
     if kind in ("link", "image"):
         return f"url: {url}"
@@ -278,7 +321,7 @@ def _link_line(d: Mapping[str, Any], kind: str) -> str:
 
 def listing_post(d: Mapping[str, Any], body_chars: int, *, omit_author: bool = False) -> str:
     kind = post_kind(d)
-    lines = [post_head(d, omit_author=omit_author), flatten(d.get("title")) or "(no title)"]
+    lines = [post_head(d, omit_author=omit_author), line_text(d.get("title")) or "(no title)"]
     extra = _link_line(d, kind)
     if extra:
         lines.append(extra)
@@ -287,7 +330,7 @@ def listing_post(d: Mapping[str, Any], body_chars: int, *, omit_author: bool = F
     if not body and kind == "crosspost":
         body = _origin(d).get("selftext") or ""
         prefix = "(original) "
-    body = flatten(body)
+    body = line_text(body)
     if body:
         lines.append("  " + prefix + truncate(body, body_chars))
     return "\n".join(lines)
@@ -301,7 +344,7 @@ def post_detail(d: Mapping[str, Any], body_chars: int) -> str:
     if extra:
         lines.append(extra)
     if kind in ("link", "image", "video") and d.get("domain"):
-        lines[-1] += f" ({d.get('domain')})"
+        lines[-1] += f" ({flatten(d.get('domain'))})"
     if kind == "gallery":
         caps = [
             flatten(i.get("caption"))
@@ -330,10 +373,10 @@ def post_detail(d: Mapping[str, Any], body_chars: int) -> str:
 
 
 def listing_comment(d: Mapping[str, Any], body_chars: int, *, omit_author: bool = False) -> str:
-    link = str(d.get("link_id") or "").removeprefix("t3_")
+    link = flatten(d.get("link_id")).removeprefix("t3_")
     parts = [
-        f"[{d.get('id', '?')}]",
-        f"r/{d.get('subreddit', '?')}",
+        f"[{flatten(d.get('id', '?'))}]",
+        f"r/{flatten(d.get('subreddit', '?'))}",
         date_str(d.get("created_utc")),
         score_str(d, with_ratio=False),
     ]
@@ -347,7 +390,7 @@ def listing_comment(d: Mapping[str, Any], body_chars: int, *, omit_author: bool 
     lines = [" ".join(parts)]
     if d.get("link_title"):
         lines.append("  re: " + flatten(d.get("link_title")))
-    body = flatten(d.get("body"))
+    body = line_text(d.get("body"))
     if body:
         lines.append("  " + truncate(body, body_chars))
     return "\n".join(lines)
@@ -355,7 +398,7 @@ def listing_comment(d: Mapping[str, Any], body_chars: int, *, omit_author: bool 
 
 def listing_subreddit(d: Mapping[str, Any], desc_chars: int = 300) -> str:
     parts = [
-        f"r/{d.get('display_name', '?')}",
+        f"r/{flatten(d.get('display_name', '?'))}",
         f"{num(d.get('subscribers'))} subscribers",
         f"created {date_str(d.get('created_utc'))}",
     ]
@@ -363,11 +406,11 @@ def listing_subreddit(d: Mapping[str, Any], desc_chars: int = 300) -> str:
         parts.append("nsfw")
     stype = d.get("subreddit_type")
     if stype and stype != "public":
-        parts.append(str(stype))
+        parts.append(flatten(stype))
     if d.get("quarantine"):
         parts.append("quarantined")
     lines = [" ".join(parts)]
-    desc = flatten(d.get("public_description") or d.get("title") or "")
+    desc = line_text(d.get("public_description") or d.get("title") or "")
     if desc:
         lines.append("  " + truncate(desc, desc_chars))
     return "\n".join(lines)
@@ -402,12 +445,12 @@ def render_thing(thing: Mapping[str, Any], body_chars: int, *, omit_author: bool
         if kind == "t5":
             return listing_subreddit(d)
         if kind == "t2":
-            return f"u/{d.get('name', '?')} created {date_str(d.get('created_utc'))}"
-        return f"[{d.get('id', '?')}] ({kind or 'unknown'} item; not rendered)"
+            return f"u/{flatten(d.get('name', '?'))} created {date_str(d.get('created_utc'))}"
+        return f"[{flatten(d.get('id', '?'))}] ({flatten(kind) or 'unknown'} item; not rendered)"
     except Exception as exc:  # one bad item must not kill the listing
         ident = "?"
         try:
-            ident = str((thing.get("data") or {}).get("id") or "?")
+            ident = flatten((thing.get("data") or {}).get("id")) or "?"
         except Exception:
             pass
         return f"[{ident}] (could not render this item: {type(exc).__name__})"
@@ -503,9 +546,9 @@ def tree_ids(children: Iterable[Mapping[str, Any]]) -> set[str]:
         if not isinstance(d, Mapping):
             continue
         if t.get("kind") == "t1" and d.get("id"):
-            ids.add(str(d["id"]))
+            ids.add(flatten(d["id"]))
         elif t.get("kind") == "more":
-            ids.update(str(i) for i in (d.get("children") or []))
+            ids.update(flatten(i) for i in (d.get("children") or []))
     return ids
 
 
@@ -518,8 +561,8 @@ def stub_ids(ids: list[str], cap: int = MAX_STUB_IDS) -> str:
 
 
 def comment_head(d: Mapping[str, Any], *, focus: str | None = None) -> str:
-    body = str(d.get("body") or "").strip()
-    cid = d.get("id", "?")
+    body = flatten(d.get("body"))
+    cid = flatten(d.get("id", "?"))
     if body in DELETED_BODIES and (d.get("author") in (None, "[deleted]")):
         head = f"[{cid}] {date_str(d.get('created_utc'))} {body}"
         return f"{head} <- requested comment" if focus and cid == focus else head
@@ -533,7 +576,7 @@ def comment_head(d: Mapping[str, Any], *, focus: str | None = None) -> str:
         parts.append(f"[{flair}]")
     dist = d.get("distinguished")
     if dist:
-        parts.append("(mod)" if dist == "moderator" else f"({dist})")
+        parts.append("(mod)" if dist == "moderator" else f"({flatten(dist)})")
     if d.get("stickied"):
         parts.append("(pinned)")
     if focus and cid == focus:
@@ -555,9 +598,9 @@ def comment_block(d: Mapping[str, Any], depth: int, *, focus: str | None = None)
 
 def stub_line(d: Mapping[str, Any], depth: int) -> str:
     pad = "  " * depth
-    ids = [str(i) for i in (d.get("children") or [])]
+    ids = [flatten(i) for i in (d.get("children") or [])]
     if d.get("id") == "_" or (not ids and not d.get("count")):
-        parent = str(d.get("parent_id") or "").split("_", 1)[-1]
+        parent = flatten(d.get("parent_id")).split("_", 1)[-1]
         return f'{pad}[continue: deeper replies under [{parent}] -> get_post(post, comment_id="{parent}")]'
     return f"{pad}[more: {plural(d.get('count'), 'comment')}; ids: {stub_ids(ids)}]"
 
@@ -599,7 +642,7 @@ class CommentRenderer:
     def _note_stub(self, d: Mapping[str, Any], *, hidden: bool = False) -> None:
         s = self.stats
         if d.get("id") == "_" or (not d.get("children") and not d.get("count")):
-            s.continues.append(str(d.get("parent_id") or "").split("_", 1)[-1])
+            s.continues.append(flatten(d.get("parent_id")).split("_", 1)[-1])
             if hidden:
                 s.hidden_continues += 1
             return
@@ -630,14 +673,14 @@ class CommentRenderer:
                 return
             self._note_stub(d)
             if not self.add(stub_line(d, depth)):
-                self.stats.pending_ids.extend(str(i) for i in (d.get("children") or []))
+                self.stats.pending_ids.extend(flatten(i) for i in (d.get("children") or []))
             return
         if kind != "t1":
-            self.add("  " * depth + f"({kind or 'unknown'} item not rendered)")
+            self.add("  " * depth + f"({flatten(kind) or 'unknown'} item not rendered)")
             return
         replies = children_of(d)
         if self.stopped or not self.add(comment_block(d, depth, focus=self.focus)):
-            self.stats.unshown_ids.append(str(d.get("id")))
+            self.stats.unshown_ids.append(flatten(d.get("id")))
             self.stats.unshown_comments += 1 + count_loaded(replies)
             self._count_hidden(replies)
             return
@@ -678,7 +721,7 @@ def activity_summary(children: Iterable[Mapping[str, Any]], top: int = 8) -> str
     dates: list[float] = []
     for t in children:
         d = t.get("data") or {}
-        subs[str(d.get("subreddit") or "?")] += 1
+        subs[flatten(d.get("subreddit")) or "?"] += 1
         if t.get("kind") == "t3":
             n_posts += 1
         elif t.get("kind") == "t1":
@@ -702,7 +745,7 @@ def activity_summary(children: Iterable[Mapping[str, Any]], top: int = 8) -> str
 
 def user_header(d: Mapping[str, Any], now: float, *, show_nsfw_profile: bool = True) -> str:
     created = d.get("created_utc")
-    parts = [f"u/{d.get('name', '?')}", f"created {date_str(created)}"]
+    parts = [f"u/{flatten(d.get('name', '?'))}", f"created {date_str(created)}"]
     try:
         parts[-1] += f" ({(now - float(created)) / 31_557_600:.1f} years)"
     except (TypeError, ValueError):

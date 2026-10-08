@@ -5,7 +5,21 @@ Reddit. It lets an MCP client such as Claude Code or Claude Desktop search posts
 discover communities, read whole threads including the comments Reddit hides behind
 "load more" links, read subreddit rules and wikis, and check who is posting.
 
-It never posts, votes, edits or deletes anything. Every tool is marked read-only.
+It never posts, votes, edits or deletes anything. Every tool is marked read-only, and every
+Reddit API request it sends is a `GET` (the only other request is the OAuth token fetch).
+
+**Why not the client's built-in web search or fetch?** This server calls Reddit's API, so results
+come back as compact text with stable ids, dates, scores and comment counts, filters by
+subreddit, sort and time window, and a coverage line that says how much of a thread the model
+has read and how to load the rest.
+
+## Example prompts
+
+- "What do data engineers on Reddit say about migrating from Hive to Iceberg? Read the most
+  discussed threads, including the comments, and tell me where opinions split."
+- "Find communities about Kubernetes cost optimization, check their rules, and summarise the top
+  posts of the last year."
+- "Has anyone discussed this article on Reddit? <url> Read the threads and list the objections."
 
 ## Highlights
 
@@ -95,17 +109,24 @@ claude mcp add --scope user reddit -- uv run --directory "$PWD" reddit-research-
 |---|---|---|
 | `search_reddit(query, subreddit="", sort="relevance", time="all", limit=25, after=None, body_chars=400)` | Search post titles and bodies, site-wide or in `a+b` subreddits. Returns a `next: after=` cursor. | 1 |
 | `browse_subreddit(subreddit, listing="hot", time="week", limit=25, after=None, body_chars=400)` | `hot`, `new`, `top`, `rising` or `controversial` posts of one or more subreddits. `time` applies to top and controversial. | 1 |
-| `search_subreddits(query, limit=10)` | Find communities by description, plus names that start with the query, with subscribers, NSFW flag, creation date and description. | 2 to 3 |
-| `get_subreddit_info(subreddit, include_rules=True, include_sidebar=False, sidebar_chars=3000)` | Size, age, type, description, rules, sidebar and wiki page list. For a private or Premium-only community it shows the public listing data and says what needs membership. | 2 to 3 |
-| `get_subreddit_wiki(subreddit, page="index", max_chars=20000)` | Read a wiki page (FAQs, guides), or list pages with `page=""`. | 1 |
+| `search_subreddits(query, limit=10)` | Find communities by description, plus names that start with the query, with subscribers, NSFW flag, creation date and description. | 1 to 3 |
+| `get_subreddit_info(subreddit, include_rules=True, include_sidebar=False, sidebar_chars=3000)` | Size, age, type, description, rules, sidebar and wiki page list. For a private or Premium-only community it shows the public listing data and says what needs membership. | 1 to 3 |
+| `get_subreddit_wiki(subreddit, page="index", max_chars=20000)` | Read a wiki page (FAQs, guides), or list pages with `page=""`. | 2 (1 with `include_nsfw=true`) |
 | `get_post(post, comment_sort="top", comment_limit=200, comment_depth=8, comment_id=None, context=0, body_chars=6000, max_chars=40000)` | The post and its comment tree in one request, with the "more" stubs and a coverage line. The body shows its first 6,000 characters by default so long posts leave room for comments; `get_posts(..., body_chars=40000)` returns the whole text. A `comment_id` that is not in the post is an error that says where the comment lives, when Reddit knows. | 1 (2 when a `comment_id` is not found) |
-| `expand_comments(post, comment_ids, sort="top", max_chars=40000)` | Load the comments behind "more" stubs, as reply trees. Up to 500 ids per call. | 1 per 100 ids |
-| `get_posts(posts, body_chars=4000, max_chars=60000)` | Full headers and bodies of many posts at once (no comments). | 1 per 100 posts |
+| `expand_comments(post, comment_ids, sort="top", max_chars=40000)` | Load the comments behind "more" stubs, as reply trees. Up to 500 ids per call; the rest are listed for the next call. | 1 per 100 ids, plus 1 for the NSFW check unless `include_nsfw=true`, plus 1 when ids come back missing |
+| `get_posts(posts, body_chars=4000, max_chars=60000)` | Full headers and bodies of many posts at once (no comments). Up to 300 posts per call; the rest are listed. | 1 per 100 posts |
 | `get_user_activity(username, kind="overview", sort="new", time="all", limit=25, after=None, body_chars=400)` | Account age and karma, recent posts and comments, and which subreddits the activity is concentrated in (from the last 100 items, whatever `limit` is). `[deleted]` is explained, not looked up. | 2 |
 | `find_other_discussions(post_or_url, limit=25)` | Crossposts and other submissions of a post's link, or every thread that submitted an external URL. | 1 to 2 |
 
-Limits are clamped to the ranges the tool descriptions state (for example `limit` 1 to 100,
-`comment_limit` 1 to 500, `comment_depth` 1 to 10), and the output says when a value was clamped.
+Every tool also takes `include_nsfw=False` (see [NSFW content](#nsfw-content)); it is left out of
+the signatures above.
+
+Numeric arguments are clamped to the ranges the tool descriptions state (for example `limit` 1 to
+100, `comment_limit` 1 to 500, `comment_depth` 1 to 10), and the output says when a value was
+clamped. Text arguments have limits too: search queries up to 512 characters, `find_other_discussions`
+URLs up to 2,048, and at most 50 subreddits in one `a+b` list. Anything longer is refused with a
+message that says so and no request is sent. A refused argument is quoted back in the error only in
+shortened form.
 
 ### Output format
 
@@ -165,8 +186,8 @@ template once instead of repeating it on every comment.
 Every tool takes `include_nsfw` (default `false`). With the default:
 
 - Posts, comments and crossposts that Reddit marks 18+ (`over_18`), and communities marked
-  18+ (`over18`), are removed before formatting. Search and community search also ask Reddit
-  not to return them.
+  18+ (`over18`), are removed before formatting. Search and community search do not
+  request them (`include_over_18` is sent only when NSFW is allowed).
 - Each result says how many items were hidden, for example
   `25 posts (3 NSFW posts hidden; include_nsfw=true shows them)`.
 - `get_post`, `expand_comments`, `get_subreddit_info`, `get_subreddit_wiki` and
@@ -178,7 +199,7 @@ Every tool takes `include_nsfw` (default `false`). With the default:
   Reddit's name lookup returns 18+ communities; names whose status cannot be checked are
   not shown.
 
-Pass `include_nsfw=true` to show everything. Set `REDDIT_RESEARCH_MCP_BLOCK_NSFW=1` in the
+Pass `include_nsfw=true` to show everything. Set `REDDIT_RESEARCH_MCP_BLOCK_NSFW=1` (`true`, `yes` and `on` also work) in the
 server's environment to keep NSFW hidden whatever the tool call asks:
 
 ```bash
@@ -210,7 +231,7 @@ graphics and tipping. What works:
 
 | Variables set | Mode |
 |---|---|
-| none | Anonymous. Uses a public installed-app client id, the same approach as the redditwarp library. No account needed. |
+| none | Anonymous. Uses the public installed-app client id that ships with the redditwarp library. No account needed. |
 | `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` | App-only OAuth (client credentials). Gives the server its own rate-limit quota. |
 | both of the above and `REDDIT_REFRESH_TOKEN` | User OAuth with a refresh token issued to that app. |
 
@@ -219,7 +240,13 @@ The server still starts, logs the problem to stderr, and every tool call returns
 
 To create credentials, sign in at <https://www.reddit.com/prefs/apps>, choose "create another
 app", pick the "script" type, and use the string under the app name as `REDDIT_CLIENT_ID` and
-the "secret" as `REDDIT_CLIENT_SECRET`. Reddit's API terms apply to your use.
+the "secret" as `REDDIT_CLIENT_SECRET`.
+
+Anonymous mode shares one public client id, and therefore one rate-limit quota, with every other
+installation of this server (and of anything else using that id) worldwide. Anyone installing this
+for a team should create their own app and set `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`.
+Reddit's Data API terms apply to your use of Reddit data through this server; read them before
+you rely on it.
 
 Other settings:
 
@@ -232,9 +259,9 @@ Other settings:
 ## Rate limits
 
 Reddit allows about 100 requests per minute per OAuth client, counted over a 10-minute window
-(1,000 requests per 600 s). In anonymous mode the client id is shared with other installations,
-so the window can already be partly used when the server starts; set your own credentials for
-heavy use.
+(1,000 requests per 600 s). In anonymous mode the client id is shared with other installations
+worldwide, so the window can already be partly used when the server starts; set your own
+credentials (see [Authentication](#authentication)) for a team or for heavy use.
 
 The server reads Reddit's `x-ratelimit-*` headers on every response. When the window is used
 up it waits if the reset is at most 15 s away and otherwise fails at once with
@@ -255,8 +282,8 @@ error. Comment expansion calls are sent one at a time, as Reddit requires.
 | `post ID not found` | Deleted, removed or a wrong id. Pass the `[id]` from a listing or the post URL. |
 | `comment ID not found in post ID` / `comment ID belongs to post OTHER` | The `comment_id` is not in that thread: it was deleted, mistyped, or belongs to another post (the message then names the right one). |
 | `Reddit rate limit reached; retry after N s` | Wait, or set your own `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`. |
-| `Network error reaching Reddit (...)` / `did not respond (waited 15 s, then 10 s on a retry)` | Connectivity problem or a slow Reddit; it was already retried once. |
-| `TOOL gave up after 45 s` | Reddit was too slow for the whole call (including rate-limit waits). Retry later or ask for less. |
+| `Network error reaching Reddit for GET <path> (...)` / `Reddit did not respond for GET <path> (waited 15 s, then 10 s on a retry)` | Connectivity problem or a slow Reddit; it was already retried once. |
+| `TOOL gave up after 45 s: Reddit is slow or not answering ...` (TOOL is the tool name) | Reddit was too slow for the whole call (including rate-limit waits). Retry later or ask for less. |
 | `Could not get an anonymous Reddit access token` | Reddit refused the anonymous token. Retry later or configure your own app. |
 | `Configuration error: ...` | Fix the `REDDIT_*` variables as the message says. |
 | HTML `403` on every call | Reddit may be blocking the network or user agent. Set credentials and a descriptive `REDDIT_USER_AGENT`. |

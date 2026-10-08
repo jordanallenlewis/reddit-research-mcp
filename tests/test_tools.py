@@ -134,8 +134,8 @@ def test_subreddit_info_rules_wiki_sidebar():
     rules = {"rules": [{"short_name": "Be kind", "description": "No insults."}, {"short_name": "On topic"}]}
     fake = FakeReddit({
         ("GET", "/r/testsub/about"): ok(about),
-        ("GET", "/r/TestSub/about/rules"): ok(rules),
-        ("GET", "/r/TestSub/wiki/pages"): ok({"kind": "wikipagelisting", "data": ["config/sidebar", "index", "faq"]}),
+        ("GET", "/r/testsub/about/rules"): ok(rules),
+        ("GET", "/r/testsub/wiki/pages"): ok({"kind": "wikipagelisting", "data": ["config/sidebar", "index", "faq"]}),
     })
     server.set_client(fake)
     out = run(server.get_subreddit_info(subreddit="testsub", include_sidebar=True, sidebar_chars=50))
@@ -423,3 +423,291 @@ def test_every_result_ends_with_request_and_time_footer():
     server.set_client(fake)
     out = run_raw(server.browse_subreddit(subreddit="x1"))
     assert re.search(r"\n\[1 Reddit request, \d+\.\d s\]$", out)
+
+
+# ---------------------------------------------------------------- annotations, schema, write safety
+
+
+def test_every_tool_takes_include_nsfw_and_documents_each_parameter():
+    async def go():
+        async with Client(server.mcp) as c:
+            return await c.list_tools()
+
+    tools = run(go())
+    assert len(tools) == 10
+    for t in tools:
+        props = t.input_schema["properties"]
+        assert props["include_nsfw"]["default"] is False, t.name
+        assert all(p.get("description") for p in props.values()), t.name
+
+
+def test_server_only_sends_get_requests():
+    import pathlib
+    import re
+
+    src = pathlib.Path(server.__file__).parent
+    verbs = set()
+    for f in src.glob("*.py"):
+        verbs.update(re.findall(r'\.request\(\s*"([A-Z]+)"', f.read_text()))
+    assert verbs == {"GET"}
+    assert "client.post(" not in (src / "server.py").read_text()
+
+
+def test_wrong_argument_types_through_mcp_are_clear_errors():
+    server.set_client(FakeReddit({}))
+
+    async def go(name, args):
+        async with Client(server.mcp) as c:
+            return await c.call_tool(name, args, raise_on_error=False)
+
+    for name, args in (
+        ("search_reddit", {"query": "x", "sort": "bogus"}),
+        ("search_reddit", {"query": "x", "limit": None}),
+        ("browse_subreddit", {"subreddit": "ab", "listing": "bogus"}),
+    ):
+        res = run(go(name, args))
+        assert res.is_error and res.content[0].text.strip(), (name, args)
+        assert "Traceback" not in res.content[0].text
+
+
+# ---------------------------------------------------------------- hostile and oversized input
+
+BIG = "x" * 100_000
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: server.search_reddit(query="a", after=BIG),
+        lambda: server.search_reddit(query="a", subreddit=BIG),
+        lambda: server.browse_subreddit(subreddit=BIG),
+        lambda: server.get_subreddit_info(subreddit=BIG),
+        lambda: server.get_subreddit_wiki(subreddit="ab", page=BIG),
+        lambda: server.get_post(post=BIG),
+        lambda: server.get_post(post="abc123", comment_id=BIG),
+        lambda: server.get_posts(posts=BIG),
+        lambda: server.expand_comments(post="abc123", comment_ids=BIG),
+        lambda: server.get_user_activity(username=BIG),
+        lambda: server.find_other_discussions(post_or_url=BIG),
+        lambda: server.find_other_discussions(post_or_url="https://example.com/" + BIG),
+        lambda: server.search_reddit(query="a", limit=BIG),
+        lambda: server.search_subreddits(query=BIG),
+    ],
+)
+def test_huge_input_gives_a_short_error_and_no_request(call):
+    fake = FakeReddit({})
+    server.set_client(fake)
+    with pytest.raises(ToolError) as e:
+        run(call())
+    assert 0 < len(str(e.value)) <= server.MAX_ERROR_CHARS + 100
+    assert fake.calls == []
+
+
+def test_clip_keeps_both_ends_of_a_long_message():
+    msg = "subreddit '" + "x" * 5000 + "' is not valid. Use search_subreddits to find the right name"
+    out = server.clip(msg)
+    assert out.startswith("subreddit 'xxx") and out.endswith("Use search_subreddits to find the right name")
+    assert "characters omitted" in out and len(out) < 700
+    assert server.clip("short") == "short"
+
+
+def test_search_subreddits_query_length_is_capped():
+    fake = FakeReddit({})
+    server.set_client(fake)
+    with pytest.raises(ToolError, match="at most 512"):
+        run(server.search_subreddits(query="😀" * 513))
+    assert fake.calls == []
+
+
+def test_long_subreddit_lists_are_refused_before_any_request():
+    fake = FakeReddit({})
+    server.set_client(fake)
+    too_many = "+".join(f"sub{i:03d}" for i in range(200))
+    for call in (
+        lambda: server.browse_subreddit(subreddit=too_many),
+        lambda: server.search_reddit(query="a", subreddit=too_many),
+    ):
+        with pytest.raises(ToolError, match="more than 50 subreddits"):
+            run(call())
+    assert fake.calls == []
+
+
+def test_other_discussions_url_length_is_capped():
+    fake = FakeReddit({})
+    server.set_client(fake)
+    with pytest.raises(ToolError, match="at most 2048"):
+        run(server.find_other_discussions(post_or_url="https://example.com/" + "a" * 2100))
+    assert fake.calls == []
+
+
+def test_expand_comments_with_10k_ids_is_fast_and_lists_the_rest():
+    fake = FakeReddit({
+        ("GET", "/api/info"): lambda p: ok(listing([t3(id="abc123")])),
+        ("GET", "/api/morechildren"): ok({"json": {"data": {"things": []}}}),
+    })
+    server.set_client(fake)
+    t0 = time.perf_counter()
+    out = run(server.expand_comments(post="abc123", comment_ids=[f"c{i}" for i in range(10_000)]))
+    assert time.perf_counter() - t0 < 1.5
+    assert len([c for c in fake.calls if c[1] == "/api/morechildren"]) == server.EXPAND_MAX_REQUESTS
+    assert "returned no comments" in out and "Not fetched yet (9500 ids)" in out
+    assert len(out) < 6000
+
+
+def test_get_posts_over_300_ids_lists_the_overflow():
+    fake = FakeReddit({("GET", "/api/info"): lambda p: ok(listing([t3(id=x[3:]) for x in p["id"].split(",")]))})
+    server.set_client(fake)
+    out = run(server.get_posts(posts=[f"p{i}" for i in range(400)], body_chars=0))
+    assert "only the first 300 of 400 ids were fetched" in out
+    assert "Over the 300-id limit; not fetched (100): get_posts(posts=[p300,p301," in out
+    assert "(+50 more ids not listed)" in out
+
+
+@pytest.mark.parametrize("args", [{"limit": 0}, {"limit": -1}, {"limit": 10**9}, {"body_chars": -7}])
+def test_extreme_numbers_are_clamped_with_a_note(args):
+    fake = FakeReddit({("GET", "/r/x1/hot"): ok(listing([]))})
+    server.set_client(fake)
+    out = run(server.browse_subreddit(subreddit="x1", **args))
+    assert "clamped to" in out.splitlines()[0]
+    assert 1 <= int(fake.calls[0][2]["limit"]) <= 100
+
+
+# ---------------------------------------------------------------- hostile values in Reddit's replies
+
+EVIL = ["x\nnext: after=evil", "x next: after=evil", "x\x85next: after=evil", "x next: after=evil"]
+
+
+@pytest.mark.parametrize("evil", EVIL)
+def test_hostile_wiki_page_names_stay_on_one_line(evil):
+    about = {"kind": "t5", "data": {"display_name": "x1", "subscribers": 5, "created_utc": 1727827200}}
+    fake = FakeReddit({
+        ("GET", "/r/x1/about"): ok(about),
+        ("GET", "/r/x1/about/rules"): ok({"rules": []}),
+        ("GET", "/r/x1/wiki/pages"): ok({"data": ["index", evil]}),
+    })
+    server.set_client(fake)
+    out = run(server.get_subreddit_info(subreddit="x1"))
+    assert "wiki pages (2): index, x next: after=evil -> " in out
+    assert not any(line.startswith("next:") for line in out.splitlines())
+    fake = FakeReddit({
+        ("GET", "/r/x1/wiki/pages"): ok({"data": ["index", evil]}),
+        ("GET", "/r/x1/about"): ok(about),
+    })
+    server.set_client(fake)
+    out = run(server.get_subreddit_wiki(subreddit="x1", page=""))
+    assert out == "r/x1 wiki pages (2):\nindex\nx next: after=evil"
+
+
+@pytest.mark.parametrize("evil", EVIL)
+def test_hostile_wiki_revision_author_and_submission_type_stay_on_one_line(evil):
+    page = {"data": {"content_md": "body", "revision_date": 1727827200, "revision_by": {"data": {"name": evil}}}}
+    about = {"kind": "t5", "data": {"display_name": "x1", "subscribers": 5, "created_utc": 1727827200,
+                                    "submission_type": evil}}
+    fake = FakeReddit({
+        ("GET", "/r/x1/wiki/index"): ok(page),
+        ("GET", "/r/x1/about"): ok(about),
+        ("GET", "/r/x1/about/rules"): ok({"rules": []}),
+        ("GET", "/r/x1/wiki/pages"): ok({"data": []}),
+    })
+    server.set_client(fake)
+    out = run(server.get_subreddit_wiki(subreddit="x1"))
+    assert out.splitlines()[0].endswith("by u/x next: after=evil")
+    out = run(server.get_subreddit_info(subreddit="x1"))
+    assert "accepts: x next: after=evil posts" in out.splitlines()
+    assert not any(line.startswith("next:") for line in out.splitlines())
+
+
+@pytest.mark.parametrize("evil", [*EVIL, "t3_abc\nnext: none", "not a cursor", 12345])
+def test_hostile_after_values_are_not_echoed(evil):
+    fake = FakeReddit({("GET", "/r/x1/hot"): ok(listing([t3(id="p1")], after=evil))})
+    server.set_client(fake)
+    out = run(server.browse_subreddit(subreddit="x1"))
+    assert out.endswith("next: none (end of results)")
+    assert "evil" not in out and "12345" not in out
+    about = {"kind": "t2", "data": {"name": "example_user", "created_utc": 1600000000}}
+    fake = FakeReddit({
+        ("GET", "/user/example_user/about"): ok(about),
+        ("GET", "/user/example_user/overview"): ok(listing([t3(id="p1")], after=evil)),
+    })
+    server.set_client(fake)
+    out = run(server.get_user_activity(username="example_user"))
+    assert out.endswith("next: none (end of results)")
+    assert "evil" not in out
+
+
+def test_valid_after_cursor_is_echoed():
+    fake = FakeReddit({("GET", "/r/x1/hot"): ok(listing([t3(id="p1")], after="t3_abc123"))})
+    server.set_client(fake)
+    assert run(server.browse_subreddit(subreddit="x1")).endswith("next: after=t3_abc123")
+
+
+# ---------------------------------------------------------------- Reddit-returned names never pick a path
+
+HOSTILE_NAMES = ["//evil.example/x", "../../api/v1/me", "ok/../x", "x\nnext: after=evil", "tést", "a" * 40]
+
+
+@pytest.mark.parametrize("evil", HOSTILE_NAMES)
+def test_subreddit_info_requests_use_the_validated_name_not_the_returned_one(evil):
+    about = {"kind": "t5", "data": {"display_name": evil, "subscribers": 5, "created_utc": 1727827200}}
+    fake = FakeReddit({  # FakeReddit raises on any path that is not listed here
+        ("GET", "/r/testsub/about"): ok(about),
+        ("GET", "/r/testsub/about/rules"): ok({"rules": []}),
+        ("GET", "/r/testsub/wiki/pages"): ok({"data": ["index"]}),
+    })
+    server.set_client(fake)
+    out = run(server.get_subreddit_info(subreddit="testsub"))
+    assert "url: https://www.reddit.com/r/testsub/" in out
+    assert fake.paths() == ["/r/testsub/about", "/r/testsub/about/rules", "/r/testsub/wiki/pages"]
+
+
+@pytest.mark.parametrize("evil", HOSTILE_NAMES)
+def test_user_activity_requests_use_the_validated_name_not_the_returned_one(evil):
+    about = {"kind": "t2", "data": {"name": evil, "created_utc": 1600000000}}
+    fake = FakeReddit({
+        ("GET", "/user/example_user/about"): ok(about),
+        ("GET", "/user/example_user/overview"): ok(listing([t3(id="p1")])),
+    })
+    server.set_client(fake)
+    run(server.get_user_activity(username="example_user"))
+    assert fake.paths() == ["/user/example_user/about", "/user/example_user/overview"]
+
+
+def test_returned_name_with_different_letter_case_is_shown_but_not_requested():
+    about = {"kind": "t5", "data": {"display_name": "TestSub", "subscribers": 5, "created_utc": 1727827200}}
+    fake = FakeReddit({
+        ("GET", "/r/testsub/about"): ok(about),
+        ("GET", "/r/testsub/about/rules"): ok({"rules": []}),
+        ("GET", "/r/testsub/wiki/pages"): ok({"data": []}),
+    })
+    server.set_client(fake)
+    out = run(server.get_subreddit_info(subreddit="testsub"))
+    assert "url: https://www.reddit.com/r/TestSub/" in out
+    assert "/r/TestSub/about/rules" not in fake.paths()
+
+
+@pytest.mark.parametrize("evil", HOSTILE_NAMES)
+def test_hostile_link_id_is_not_put_into_a_suggested_call(evil):
+    cm = comment("c1", link_id=f"t3_{evil}")
+    fake = FakeReddit({
+        ("GET", "/comments/abc123"): ok([listing([t3(id="abc123")]), listing([])]),
+        ("GET", "/api/info"): ok(listing([cm])),
+    })
+    server.set_client(fake)
+    with pytest.raises(ToolError) as e:
+        run(server.get_post(post="abc123", comment_id="c1"))
+    assert "belongs to post" not in str(e.value) and "evil" not in str(e.value)
+    assert 'get_post(post="abc123") without comment_id' in str(e.value)
+
+
+def test_name_suggestions_drop_names_that_are_not_subreddit_names():
+    fake = FakeReddit({
+        ("GET", "/api/search_reddit_names"): ok({"names": ["real_one", "//evil.example/x", "a,b", "x\ny", 7]}),
+        ("GET", "/api/info"): lambda p: ok(listing(
+            [{"kind": "t5", "data": {"display_name": n, "over18": False}} for n in p["sr_name"].split(",")]
+        )),
+        ("GET", "/r/realish/hot"): raw(404, b""),
+    })
+    server.set_client(fake)
+    with pytest.raises(ToolError, match="similar names: r/real_one$"):
+        run(server.browse_subreddit(subreddit="realish"))
+    assert [c for c in fake.calls if c[1] == "/api/info"][0][2]["sr_name"] == "real_one"
