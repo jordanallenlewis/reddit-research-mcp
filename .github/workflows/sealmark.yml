@@ -1,0 +1,37 @@
+# Sealmark (https://sealmark.dev) grades this server's MCP behaviour. It starts the server from
+# this checkout over stdio, sends fixed probes, and stops it. No Reddit credentials are set: the
+# server runs anonymously, and Sealmark's probes do not reach Reddit.
+#
+# Gate: --fail-under A is passed explicitly so the policy is visible here. Any graded pack below
+# an A fails the job, and so do setup and server-start errors. (A is also Sealmark 0.2.0's
+# default.) To relax it use --fail-under B (or C, D, F). Do not add --soft-fail: it would let a
+# bad grade pass. Bump the pinned Sealmark version deliberately.
+name: sealmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sealmark:
+    name: sealmark conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Install the server the way a user gets it, so a version that cannot import fails here.
+      - run: python3 -m venv /tmp/venv && /tmp/venv/bin/pip install --no-cache-dir .
+      # No --url: this server speaks MCP over stdio only. CI=true is already set by Actions, so
+      # Sealmark prints a readable summary and writes the JUnit and JSON reports.
+      - run: npx -y sealmark@0.2.0 run --fail-under A --start "/tmp/venv/bin/reddit-research-mcp"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sealmark-report
+          path: sealmark-report/
