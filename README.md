@@ -1,5 +1,7 @@
 # reddit-research-mcp
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/jordanallenlewis-reddit-research-mcp-7s2f1a?v=248628a65e1c368c5295692e94e2aa41)](https://m8ven.ai/mcp/jordanallenlewis-reddit-research-mcp-7s2f1a?s=readme)
+
 A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for researching
 Reddit. It lets an MCP client such as Claude Code or Claude Desktop search posts, browse and
 discover communities, read whole threads including the comments Reddit hides behind
