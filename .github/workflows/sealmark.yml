@@ -3,9 +3,11 @@
 # server runs anonymously, and Sealmark's probes do not reach Reddit.
 #
 # Gate: --fail-under A is passed explicitly so the policy is visible here. Any graded pack below
-# an A fails the job, and so do setup and server-start errors. (A is also Sealmark 0.2.0's
-# default.) To relax it use --fail-under B (or C, D, F). Do not add --soft-fail: it would let a
-# bad grade pass. Bump the pinned Sealmark version deliberately.
+# an A fails the job, and so do setup and server-start errors. To relax it use --fail-under B
+# (or C, D, F). Do not add --soft-fail: it would let a bad grade pass.
+# Version: sealmark@latest, so new Sealmark releases apply without editing this file;
+# the explicit --fail-under A keeps the gate fixed if a release changes its default.
+# A new release can add checks and turn this job red with no change here.
 name: sealmark
 
 on:
@@ -29,7 +31,7 @@ jobs:
       - run: python3 -m venv /tmp/venv && /tmp/venv/bin/pip install --no-cache-dir .
       # No --url: this server speaks MCP over stdio only. CI=true is already set by Actions, so
       # Sealmark prints a readable summary and writes the JUnit and JSON reports.
-      - run: npx -y sealmark@0.2.0 run --fail-under A --start "/tmp/venv/bin/reddit-research-mcp"
+      - run: npx -y sealmark@latest run --fail-under A --start "/tmp/venv/bin/reddit-research-mcp"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
