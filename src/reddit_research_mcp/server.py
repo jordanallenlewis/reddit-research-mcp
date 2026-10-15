@@ -15,6 +15,7 @@ from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.dependencies import get_context
 from pydantic import Field
 
 from . import __version__, refs
@@ -51,6 +52,9 @@ called with include_nsfw=true; only ask for it when the user wants it.
 """
 
 mcp = FastMCP("reddit-research", instructions=INSTRUCTIONS, version=__version__)
+from . import prompts  # noqa: E402
+
+prompts.register(mcp)
 
 READ_ONLY = {
     "readOnlyHint": True,
@@ -80,6 +84,17 @@ _client: RedditClient | None = None
 
 def _elapsed(start: float) -> float:
     return time.monotonic() - start
+
+
+async def _progress(done: int, total: int) -> None:
+    """Report batch progress to clients that asked for it; a no-op for single requests or no client."""
+    if total < 2:
+        return
+    try:
+        ctx = get_context()
+    except RuntimeError:
+        return
+    await ctx.report_progress(done, total)
 
 
 def deadline(fn: Any) -> Any:
@@ -1240,6 +1255,7 @@ async def expand_comments(
             got = await client.morechildren(pid, batch, sort)
             things.extend(got)
             est += sum(len(str((t.get("data") or {}).get("body") or "")) + 60 for t in got)
+            await _progress(i + 1, len(batches))
         left = set(remaining)
         fetched = [x for x in ids if x not in left]
         returned = {
@@ -1334,6 +1350,7 @@ async def get_posts(
                 d = c.get("data") or {}
                 if c.get("kind") == "t3" and d.get("id"):
                     found[str(d["id"])] = d
+            await _progress(i // INFO_BATCH + 1, (len(ids) + INFO_BATCH - 1) // INFO_BATCH)
         nsfw_ids: list[str] = []
         if not _nsfw_allowed(include_nsfw):
             nsfw_ids = [x for x in ids if x in found and fmt.is_nsfw(found[x])]
@@ -1562,10 +1579,18 @@ async def find_other_discussions(
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="reddit-research-mcp",
-        description="Read-only Reddit research server for MCP clients (stdio transport).",
+        description="Read-only Reddit research server for MCP clients (stdio by default, or streamable HTTP).",
     )
     parser.add_argument("--version", action="version", version=f"reddit-research-mcp {__version__}")
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="stdio (default) for local clients, or http to serve streamable HTTP",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default 127.0.0.1, this machine only)")
+    parser.add_argument("--port", type=int, default=8000, help="HTTP port (default 8000)")
+    args = parser.parse_args(argv)
     level = os.environ.get("REDDIT_RESEARCH_MCP_LOG_LEVEL", "WARNING").upper()
     handler = logging.StreamHandler(sys.stderr)  # stdout carries the MCP protocol
     handler.setFormatter(logging.Formatter("reddit-research-mcp %(levelname)s %(message)s"))
@@ -1577,7 +1602,12 @@ def main(argv: list[str] | None = None) -> None:
     except ConfigError as exc:
         # Keep serving so the client can show the message; every tool call reports it too.
         log.error("configuration error: %s", exc)
-    mcp.run(show_banner=False)
+    if args.transport == "http":
+        if args.host not in ("127.0.0.1", "localhost", "::1"):
+            log.warning("serving on %s: anyone who can reach this address can use the server", args.host)
+        mcp.run(transport="http", host=args.host, port=args.port, show_banner=False)
+    else:
+        mcp.run(show_banner=False)
 
 
 if __name__ == "__main__":

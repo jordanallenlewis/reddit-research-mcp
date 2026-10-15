@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `reddit_research(question)` MCP prompt: a step-by-step, cited Reddit research workflow that uses the server's tools.
+- `--transport http` serves streamable HTTP (with `--host`, default 127.0.0.1, and `--port`, default 8000). stdio stays the default.
+- Progress updates from `get_posts` and `expand_comments` when a call needs more than one Reddit request.
+
 ## [0.2.2] - 2026-10-08
 
 ### Fixed

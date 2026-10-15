@@ -90,11 +90,19 @@ Put `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` in `env` to use your own app.
 
 ### Other MCP clients
 
-The server speaks MCP over stdio. Run it with:
+The server speaks MCP over stdio by default. Run it with:
 
 ```bash
 uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp
 ```
+
+For clients that connect over HTTP, serve streamable HTTP instead. It binds to 127.0.0.1 unless you pass `--host`, and the endpoint is `http://127.0.0.1:8000/mcp`:
+
+```bash
+uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp --transport http --port 8000
+```
+
+There is no authentication on the HTTP endpoint, so only bind it to an address you trust.
 
 ### From a local checkout
 
@@ -130,6 +138,12 @@ clamped. Text arguments have limits too: search queries up to 512 characters, `f
 URLs up to 2,048, and at most 50 subreddits in one `a+b` list. Anything longer is refused with a
 message that says so and no request is sent. A refused argument is quoted back in the error only in
 shortened form.
+
+`get_posts` and `expand_comments` send one progress update per Reddit request when the client asks for progress and the call needs more than one request.
+
+### Prompt
+
+The server also offers one MCP prompt, `reddit_research(question)`. It walks the assistant through a cited research pass: find the communities, check their rules, search, read the most discussed threads, check who is talking, and write findings grouped by theme where every claim quotes a comment with its author, subreddit, score and permalink. In Claude Code it shows up as a slash command.
 
 ### Output format
 
