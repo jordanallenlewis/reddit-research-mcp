@@ -543,7 +543,7 @@ def test_body_under_the_cap_is_parsed(monkeypatch):
 
 def test_default_user_agent_is_name_version_and_repo_url_only():
     assert re.fullmatch(
-        r"reddit-research-mcp/\d+\.\d+\.\d+ \(\+https://github\.com/[\w.-]+/reddit-research-mcp\)",
+        r"reddit-readonly-mcp/\d+\.\d+\.\d+ \(\+https://github\.com/[\w.-]+/reddit-research-mcp\)",
         DEFAULT_USER_AGENT,
     )
 

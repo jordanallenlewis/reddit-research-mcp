@@ -1578,10 +1578,10 @@ async def find_other_discussions(
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="reddit-research-mcp",
+        prog="reddit-readonly-mcp",
         description="Read-only Reddit research server for MCP clients (stdio by default, or streamable HTTP).",
     )
-    parser.add_argument("--version", action="version", version=f"reddit-research-mcp {__version__}")
+    parser.add_argument("--version", action="version", version=f"reddit-readonly-mcp {__version__}")
     parser.add_argument(
         "--transport",
         choices=["stdio", "http"],
@@ -1593,7 +1593,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     level = os.environ.get("REDDIT_RESEARCH_MCP_LOG_LEVEL", "WARNING").upper()
     handler = logging.StreamHandler(sys.stderr)  # stdout carries the MCP protocol
-    handler.setFormatter(logging.Formatter("reddit-research-mcp %(levelname)s %(message)s"))
+    handler.setFormatter(logging.Formatter("reddit-readonly-mcp %(levelname)s %(message)s"))
     log.addHandler(handler)
     log.setLevel(getattr(logging, level, logging.WARNING))
     log.propagate = False

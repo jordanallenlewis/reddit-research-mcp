@@ -12,7 +12,7 @@ def test_anonymous_by_default():
     cfg = load_config({})
     assert cfg.mode == "anonymous"
     assert cfg.user_agent == DEFAULT_USER_AGENT
-    assert DEFAULT_USER_AGENT.startswith("reddit-research-mcp/")
+    assert DEFAULT_USER_AGENT.startswith("reddit-readonly-mcp/")
 
 
 def test_app_and_user_modes():

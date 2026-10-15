@@ -32,7 +32,7 @@ from . import __version__
 log = logging.getLogger("reddit_research_mcp")
 
 PROJECT_URL = "https://github.com/jordanallenlewis/reddit-research-mcp"
-DEFAULT_USER_AGENT = f"reddit-research-mcp/{__version__} (+{PROJECT_URL})"
+DEFAULT_USER_AGENT = f"reddit-readonly-mcp/{__version__} (+{PROJECT_URL})"
 REQUEST_TIMEOUT = 15.0  # seconds for the first attempt of an HTTP request
 RETRY_TIMEOUT = 10.0  # seconds for the single retry, so a hung request gives up within ~26 s
 MAX_RETRY_WAIT = 15.0  # longest wait we accept before retrying a 429 or an exhausted window

@@ -31,7 +31,7 @@ jobs:
       - run: python3 -m venv /tmp/venv && /tmp/venv/bin/pip install --no-cache-dir .
       # No --url: this server speaks MCP over stdio only. CI=true is already set by Actions, so
       # Sealmark prints a readable summary and writes the JUnit and JSON reports.
-      - run: npx -y sealmark@latest run --fail-under A --start "/tmp/venv/bin/reddit-research-mcp"
+      - run: npx -y sealmark@latest run --fail-under A --start "/tmp/venv/bin/reddit-readonly-mcp"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

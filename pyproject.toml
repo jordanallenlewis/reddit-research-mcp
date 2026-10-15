@@ -1,5 +1,5 @@
 [project]
-name = "reddit-research-mcp"
+name = "reddit-readonly-mcp"
 dynamic = ["version"]
 description = "Read-only Reddit research server for the Model Context Protocol: search, browse, read whole threads and expand hidden comments."
 readme = "README.md"
@@ -25,7 +25,8 @@ dependencies = [
 ]
 
 [project.scripts]
-reddit-research-mcp = "reddit_research_mcp.server:main"
+reddit-readonly-mcp = "reddit_research_mcp.server:main"
+reddit-research-mcp = "reddit_research_mcp.server:main"  # old name, kept so existing setups keep working
 
 [project.urls]
 Homepage = "https://github.com/jordanallenlewis/reddit-research-mcp"

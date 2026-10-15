@@ -12,6 +12,10 @@ All notable changes to this project are documented here. The format follows
 - `--transport http` serves streamable HTTP (with `--host`, default 127.0.0.1, and `--port`, default 8000). stdio stays the default.
 - Progress updates from `get_posts` and `expand_comments` when a call needs more than one Reddit request.
 
+### Changed
+
+- The package and command are now `reddit-readonly-mcp`, so the name no longer clashes with an unrelated PyPI package. `reddit-research-mcp` still works as a command alias, and the User-Agent now starts with `reddit-readonly-mcp/`.
+
 ## [0.2.2] - 2026-10-08
 
 ### Fixed

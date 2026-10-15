@@ -8,7 +8,7 @@ run time; nothing about real users is stored.
 
     uv run python scripts/smoke.py
     uv run python scripts/smoke.py --server-cmd \
-        "uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp"
+        "uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-readonly-mcp"
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ async def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument(
         "--server-cmd",
-        default=f"uv run --quiet --directory {shlex.quote(str(ROOT))} reddit-research-mcp",
+        default=f"uv run --quiet --directory {shlex.quote(str(ROOT))} reddit-readonly-mcp",
         help="Command that starts the server on stdio.",
     )
     ap.add_argument("--subreddit", default="dataengineering", help="Busy subreddit to exercise.")
@@ -102,7 +102,7 @@ async def main() -> int:
     opts = ap.parse_args()
 
     cmd = shlex.split(opts.server_cmd)
-    log_path = Path(tempfile.mkstemp(prefix="reddit-research-mcp-smoke-", suffix=".log")[1])
+    log_path = Path(tempfile.mkstemp(prefix="reddit-readonly-mcp-smoke-", suffix=".log")[1])
     env = dict(os.environ, REDDIT_RESEARCH_MCP_LOG_LEVEL="DEBUG")
     transport = StdioTransport(command=cmd[0], args=cmd[1:], env=env, log_file=log_path, keep_alive=False)
     print(f"server: {' '.join(cmd)}\nlog: {log_path}\n")

@@ -1,4 +1,4 @@
-# reddit-research-mcp
+# reddit-readonly-mcp
 
 [![M8ven Score](https://m8ven.ai/badge/mcp/jordanallenlewis-reddit-research-mcp-7s2f1a?v=248628a65e1c368c5295692e94e2aa41)](https://m8ven.ai/mcp/jordanallenlewis-reddit-research-mcp-7s2f1a?s=readme)
 [![Sealmark](https://github.com/jordanallenlewis/reddit-research-mcp/actions/workflows/sealmark.yml/badge.svg)](https://sealmark.dev)
@@ -15,6 +15,8 @@ Reddit API request it sends is a `GET` (the only other request is the OAuth toke
 come back as compact text with stable ids, dates, scores and comment counts, filters by
 subreddit, sort and time window, and a coverage line that says how much of a thread the model
 has read and how to load the rest.
+
+The command and package are called `reddit-readonly-mcp` (renamed from `reddit-research-mcp`, which still works as an alias so existing setups keep running).
 
 ## Example prompts
 
@@ -54,7 +56,7 @@ has read and how to load the rest.
 ### Claude Code
 
 ```bash
-claude mcp add --scope user reddit -- uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp
+claude mcp add --scope user reddit -- uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-readonly-mcp
 ```
 
 With your own Reddit app credentials (see [Authentication](#authentication)):
@@ -62,7 +64,7 @@ With your own Reddit app credentials (see [Authentication](#authentication)):
 ```bash
 claude mcp add --scope user reddit \
   -e REDDIT_CLIENT_ID=your_client_id -e REDDIT_CLIENT_SECRET=your_client_secret \
-  -- uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp
+  -- uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-readonly-mcp
 ```
 
 ### Claude Desktop
@@ -77,7 +79,7 @@ Add this to `claude_desktop_config.json` (Settings, Developer, Edit Config) and 
       "args": [
         "--from",
         "git+https://github.com/jordanallenlewis/reddit-research-mcp",
-        "reddit-research-mcp"
+        "reddit-readonly-mcp"
       ],
       "env": {}
     }
@@ -93,13 +95,13 @@ Put `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` in `env` to use your own app.
 The server speaks MCP over stdio by default. Run it with:
 
 ```bash
-uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp
+uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-readonly-mcp
 ```
 
 For clients that connect over HTTP, serve streamable HTTP instead. It binds to 127.0.0.1 unless you pass `--host`, and the endpoint is `http://127.0.0.1:8000/mcp`:
 
 ```bash
-uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp --transport http --port 8000
+uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-readonly-mcp --transport http --port 8000
 ```
 
 There is no authentication on the HTTP endpoint, so only bind it to an address you trust.
@@ -110,8 +112,8 @@ There is no authentication on the HTTP endpoint, so only bind it to an address y
 git clone https://github.com/jordanallenlewis/reddit-research-mcp
 cd reddit-research-mcp
 uv sync
-uv run reddit-research-mcp --version
-claude mcp add --scope user reddit -- uv run --directory "$PWD" reddit-research-mcp
+uv run reddit-readonly-mcp --version
+claude mcp add --scope user reddit -- uv run --directory "$PWD" reddit-readonly-mcp
 ```
 
 ## Tools
@@ -221,7 +223,7 @@ server's environment to keep NSFW hidden whatever the tool call asks:
 
 ```bash
 claude mcp add --scope user reddit -e REDDIT_RESEARCH_MCP_BLOCK_NSFW=1 \
-  -- uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-research-mcp
+  -- uvx --from git+https://github.com/jordanallenlewis/reddit-research-mcp reddit-readonly-mcp
 ```
 
 The filter relies on Reddit's own 18+ flags. Posts that Reddit does not flag, in communities
@@ -269,7 +271,7 @@ Other settings:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `REDDIT_USER_AGENT` | `reddit-research-mcp/<version> (+https://github.com/jordanallenlewis/reddit-research-mcp)` | User-Agent sent to Reddit. Reddit asks for a descriptive one that names you. |
+| `REDDIT_USER_AGENT` | `reddit-readonly-mcp/<version> (+https://github.com/jordanallenlewis/reddit-research-mcp)` | User-Agent sent to Reddit. Reddit asks for a descriptive one that names you. |
 | `REDDIT_RESEARCH_MCP_LOG_LEVEL` | `WARNING` | Set `DEBUG` to log every request (path, status, latency, remaining quota) to stderr. |
 | `REDDIT_RESEARCH_MCP_BLOCK_NSFW` | unset | Set `1` to hide NSFW content even when a tool call passes `include_nsfw=true` (for shared or work installs). |
 
