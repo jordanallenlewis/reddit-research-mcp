@@ -1,3 +1,5 @@
+<img src="assets/logo.svg" width="64" height="64" alt="reddit-readonly-mcp logo">
+
 # reddit-readonly-mcp
 
 [![M8ven Score](https://m8ven.ai/badge/mcp/jordanallenlewis-reddit-research-mcp-7s2f1a?v=248628a65e1c368c5295692e94e2aa41)](https://m8ven.ai/mcp/jordanallenlewis-reddit-research-mcp-7s2f1a?s=readme)
