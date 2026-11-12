@@ -3,7 +3,7 @@
 # reddit-readonly-mcp
 
 [![M8ven Score](https://m8ven.ai/badge/mcp/jordanallenlewis-reddit-research-mcp-7s2f1a?v=248628a65e1c368c5295692e94e2aa41)](https://m8ven.ai/mcp/jordanallenlewis-reddit-research-mcp-7s2f1a?s=readme)
-[![Sealmark](https://github.com/jordanallenlewis/reddit-research-mcp/actions/workflows/sealmark.yml/badge.svg)](https://sealmark.dev)
+[![Sealmark](https://github.com/jordanallenlewis/reddit-research-mcp/actions/workflows/sealmark.yml/badge.svg)](https://sealmark.dev/?utm_source=github&utm_medium=readme&utm_campaign=reddit-research-mcp)
 
 A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for researching
 Reddit. It lets an MCP client such as Claude Code or Claude Desktop search posts, browse and
