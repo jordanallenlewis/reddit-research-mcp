@@ -429,8 +429,10 @@ class RedditClient:
         if self._remaining < 1:
             wait = self._reset_at - now
             if wait <= max_wait:
+                window = self._reset_at
                 await self.sleep(wait)
-                self._remaining = None
+                if self._reset_at == window:  # a call that hit a 429 meanwhile may have pushed it out
+                    self._remaining = None
                 return wait
             raise RateLimitedError(
                 wait,
@@ -589,10 +591,16 @@ class RedditClient:
             if status == 429:
                 wait = _parse_retry_after(headers)
                 if attempt == 0 and wait <= MAX_RETRY_WAIT - slept:
+                    window = self._reset_at
                     await self.sleep(max(wait, 0.5))
                     slept += max(wait, 0.5)
-                    self._remaining = None  # waited as asked; let the retry through the gate
+                    if self._reset_at == window:  # unless another call's 429 set a longer cool-down meanwhile
+                        self._remaining = None  # waited as asked; let the retry through the gate
                     continue
+                # Giving up: hold every later request until Reddit's wait is over, even when the
+                # 429 carried no x-ratelimit headers. Never shortens a longer window already known.
+                self._remaining = 0.0
+                self._reset_at = max(self._reset_at, self.clock() + min(wait, MAX_RESET_SECONDS))
                 raise RateLimitedError(wait)
             if status == 401 and attempt == 0 and self._drop_token():
                 continue  # the token may have been revoked; fetch a fresh one once
