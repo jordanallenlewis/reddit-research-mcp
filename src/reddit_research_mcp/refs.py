@@ -181,13 +181,22 @@ def _post_from_url(s: str, raw: str, arg: str) -> PostRef:
     m = re.search(r"/gallery/([0-9a-z]+)", path, re.I)
     if m:
         return _post_ref(m.group(1), None, raw, arg)
-    if re.search(r"/r/[^/]+/s/[A-Za-z0-9]+", path):
-        raise InputError(
-            f"{arg} {_q(raw)} is a share link (/s/...), which the API cannot resolve. Open it in a "
-            "browser and pass the /comments/ URL it redirects to"
-        )
+    if _is_share_path(path):
+        raise _share_link_error(raw, arg)
     raise InputError(
         f"{arg} {_q(raw)} is a Reddit URL but not a post; post URLs contain /comments/<id>/"
+    )
+
+
+def _is_share_path(path: str) -> bool:
+    """True for the path of a share link: /r/<sub>/s/<code> or /u/<name>/s/<code>."""
+    return bool(re.fullmatch(r"/(?:r|u|user)/[^/]+/s/[A-Za-z0-9]+/?", path, re.I))
+
+
+def _share_link_error(raw: object, arg: str) -> InputError:
+    return InputError(
+        f"{arg} {_q(raw)} is a share link (/s/...), which the API cannot resolve. Open it in a "
+        "browser and pass the /comments/ URL it redirects to"
     )
 
 
@@ -388,12 +397,15 @@ def parse_discussion_target(raw: str | None, *, arg: str = "post_or_url") -> Dis
     if not s:
         raise InputError(f"{arg} is empty; pass a post id, a Reddit post URL or an article URL")
     if _looks_like_url(s):
-        host, _ = _split_url(s, raw, arg)
+        host, path = _split_url(s, raw, arg)
         if _is_reddit_host(host):
             try:
                 return DiscussionTarget(post=parse_post_ref(s, arg=arg))
             except InputError:
-                pass
+                # Nothing on Reddit links to a share link, so looking it up as an article
+                # would only come back empty: say what to pass instead.
+                if _is_share_path(path):
+                    raise _share_link_error(raw, arg) from None
         return DiscussionTarget(url=_external_url(s, raw, arg))
     if "." in s and "/" in s and not re.search(r"\s", s):
         return DiscussionTarget(url=_external_url(s, raw, arg))
