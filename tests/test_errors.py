@@ -426,11 +426,14 @@ def test_absurd_reset_closes_the_window_for_a_bounded_time_only():
 
 def test_missing_ratelimit_headers_do_not_loop():
     fake = FakeReddit({("GET", "/search"): raw(429, b"", {"retry-after": "1"})})
+    _manual_clock(fake)
     for _ in range(5):
         with pytest.raises(RateLimitedError):
             run(fake.get("/search", q="x"))
     assert len(fake.calls) == 10  # exactly one retry per request, never more
-    assert fake.sleeps == [1.0] * 5
+    # The first call waits once before its retry; each later call first waits out the
+    # previous call's final "retry after 1 s" at the gate, then once more before its retry.
+    assert fake.sleeps == [1.0] * 9
 
 
 def test_gate_wait_and_429_wait_share_one_budget():
