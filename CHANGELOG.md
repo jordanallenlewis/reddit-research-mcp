@@ -16,6 +16,13 @@ All notable changes to this project are documented here. The format follows
 
 - The package and command are now `reddit-readonly-mcp`, so the name no longer clashes with an unrelated PyPI package. `reddit-research-mcp` still works as a command alias, and the User-Agent now starts with `reddit-readonly-mcp/`.
 
+### Fixed
+
+- After Reddit answered 429 with a long `Retry-After` (and no `x-ratelimit-*` headers), the next
+  tool calls still sent requests to Reddit, and a parallel call waking from a short wait could
+  clear a longer wait. The server now holds API requests until Reddit's wait is over and fails
+  those calls locally with the time left; a short wait is slept out before the next request.
+
 ## [0.2.2] - 2026-10-08
 
 ### Fixed
