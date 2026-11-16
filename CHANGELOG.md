@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- README "Authentication" gives the dates Reddit announced for closing its public Data API (no new
+  access requests after 2026-10-31, access removed from 2027-01-12 for apps that have not
+  registered, closed in March 2027) and says new app credentials may no longer be available.
 - The package and command are now `reddit-readonly-mcp`, so the name no longer clashes with an unrelated PyPI package. `reddit-research-mcp` still works as a command alias, and the User-Agent now starts with `reddit-readonly-mcp/`.
 
 ### Fixed
