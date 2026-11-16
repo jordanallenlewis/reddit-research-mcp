@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format follows
   tool calls still sent requests to Reddit, and a parallel call waking from a short wait could
   clear a longer wait. The server now holds API requests until Reddit's wait is over and fails
   those calls locally with the time left; a short wait is slept out before the next request.
+- Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08
 

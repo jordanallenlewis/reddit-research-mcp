@@ -53,6 +53,10 @@ def test_parse_post_ref(raw, expected):
         ("https://example.com/article", "not a Reddit post URL"),
         ("https://i.redd.it/picture.jpg", "media file URL"),
         ("https://www.reddit.com/r/testsub/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com/u/someone/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com/user/someone/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com/R/testsub/s/AbCdEf123", "share link"),
+        ("https://reddit.com/r/testsub/s/AbCdEf123?share_id=x", "share link"),
         ("https://www.reddit.com/r/testsub/", "not a post"),
         ("not an id!", "valid post id"),
     ],
@@ -170,6 +174,42 @@ def test_discussion_target():
     assert parse_discussion_target("https://www.reddit.com/r/x1/wiki/").url == "https://www.reddit.com/r/x1/wiki/"
     with pytest.raises(InputError, match="post_or_url is empty"):
         parse_discussion_target(" ")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://www.reddit.com/r/testsub/s/AbCdEf123",
+        "https://www.reddit.com/u/someone/s/AbCdEf123",
+        "https://www.reddit.com/user/someone/s/AbCdEf123",
+        "www.reddit.com/R/testsub/s/AbCdEf123/",
+        "https://www.reddit.com/U/someone/s/AbCdEf123",
+        "https://www.reddit.com/USER/someone/S/AbCdEf123",
+    ],
+)
+def test_discussion_target_share_link(raw):
+    # A share link cannot be resolved through the API, so looking it up as an article URL
+    # could not find the discussion behind it.
+    with pytest.raises(InputError, match="share link"):
+        parse_discussion_target(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://www.reddit.com/r/testsub/s/",  # no code
+        "https://www.reddit.com/user/s/submitted/",  # a user named "s"
+        "https://www.reddit.com/r/testsub/wiki/s/abc",
+        "https://www.reddit.com/r/testsub/wiki/u/someone/s/abc",  # looks like one, deeper in the path
+    ],
+)
+def test_discussion_target_near_share_link_is_a_url(raw):
+    assert parse_discussion_target(raw).url == raw
+
+
+def test_comment_id_share_link():
+    with pytest.raises(InputError, match="share link"):
+        parse_comment_id("https://www.reddit.com/r/testsub/s/AbCdEf123")
 
 
 def test_url_variants():
