@@ -28,6 +28,10 @@ All notable changes to this project are documented here. The format follows
 - When Reddit's token endpoint answered 429, the next tool call asked it for a token again at
   once. The server now holds requests for the 60 s the error reports, and a parallel call waking
   from a short 429 wait no longer clears a cool-down another call started meanwhile.
+- A call waiting a few seconds for a used-up request window to reset sent its request as soon as
+  it woke, even if a parallel call had started a 429 cool-down or seen a new used-up window in the
+  meantime. It now checks again: it waits on only if its total wait stays within 15 s, and
+  otherwise fails locally with the time left, without sending.
 - Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08
