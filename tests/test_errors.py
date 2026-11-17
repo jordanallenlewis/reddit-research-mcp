@@ -462,6 +462,244 @@ def test_gate_waits_for_a_new_used_up_window_only_within_the_budget_left(new_res
     assert sent_at == sent
 
 
+def test_parallel_call_waits_out_another_calls_retried_429_before_sending():
+    # Call A gets "retry after 10" (short enough to retry) and sleeps. Four seconds in, call B
+    # starts. Reddit asked this client to wait 10 s, so B must not be sent before 1010.
+    sent_at: dict[str, list[float]] = {"/search": [], "/r/x1/hot": []}
+
+    def sender(path, *responses):
+        queue = list(responses)
+
+        def send(params):
+            sent_at[path].append(now[0])
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+
+        return send
+
+    fake = FakeReddit({
+        ("GET", "/search"): sender("/search", raw(429, b"", {"retry-after": "10"}), ok(listing([]))),
+        ("GET", "/r/x1/hot"): sender("/r/x1/hot", ok(listing([]))),
+    })
+    now = _manual_clock(fake)
+    other_ran = []
+
+    async def sleep(seconds: float) -> None:
+        fake.sleeps.append(seconds)
+        if not other_ran:
+            other_ran.append(True)
+            now[0] += 4
+            assert (await fake.get("/r/x1/hot"))["kind"] == "Listing"  # waits 6 s at the gate
+            now[0] += seconds - 4 - 6  # A's own 10 s are over too; the clock never runs back
+            return
+        now[0] += seconds
+
+    fake.sleep = sleep
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert sent_at == {"/search": [1000.0, 1010.0], "/r/x1/hot": [1010.0]}
+    assert fake.sleeps == [10.0, 6.0]
+
+
+def test_parallel_call_during_a_retried_429_still_honours_a_longer_known_window():
+    # A's 429 says "retry after 2" but also that the window is used up for 40 s. A retries once
+    # after its 2 s (as before); B, started during that wait, fails fast with the window's 40 s,
+    # unsent: the short wait never shortens a longer window Reddit already announced.
+    headers = {"retry-after": "2", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "40"}
+    fake = FakeReddit({
+        ("GET", "/search"): [raw(429, b"", headers), ok(listing([]))],
+        ("GET", "/r/x1/hot"): ok(listing([])),
+    })
+    now = _manual_clock(fake)
+    errors = []
+
+    async def sleep(seconds: float) -> None:
+        fake.sleeps.append(seconds)
+        if not errors:
+            with pytest.raises(RateLimitedError) as e:
+                await fake.get("/r/x1/hot")
+            errors.append(e.value)
+        now[0] += seconds
+
+    fake.sleep = sleep
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert fake.paths() == ["/search", "/search"]
+    assert errors[0].retry_after == 40 and fake.sleeps == [2.0]
+
+
+def test_retried_429_holds_parallel_calls_only_for_its_wait_when_the_window_has_requests_left():
+    # A's 429 says "retry after 2" while the window still has 50 requests and resets in 500 s.
+    # B, started during A's wait, waits the 2 s and is sent: a window with requests left is not
+    # a cool-down, so B never fails with the window's 500 s.
+    window = {"x-ratelimit-remaining": "50", "x-ratelimit-reset": "500"}
+    sent_at = []
+
+    def other(params):
+        sent_at.append(now[0])
+        return ok(listing([]))
+
+    fake = FakeReddit({
+        ("GET", "/search"): [raw(429, b"", {"retry-after": "2", **window}), ok(listing([]))],
+        ("GET", "/r/x1/hot"): other,
+    })
+    now = _manual_clock(fake)
+    other_ran = []
+
+    async def sleep(seconds: float) -> None:
+        fake.sleeps.append(seconds)
+        if not other_ran:
+            other_ran.append(True)
+            assert (await fake.get("/r/x1/hot"))["kind"] == "Listing"
+            return  # B's gate wait already moved the clock past A's 2 s
+        now[0] += seconds
+
+    fake.sleep = sleep
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert sent_at == [1002.0] and fake.sleeps == [2.0, 2.0]
+    assert fake.paths() == ["/search", "/r/x1/hot", "/search"]
+
+
+class _VirtualTime:
+    """Real asyncio concurrency on a clock that jumps to the next wake-up when every task is idle."""
+
+    def __init__(self, fake: FakeReddit, start: float = 1000.0) -> None:
+        self.now = start
+        self.fake = fake
+        self._timers: list[tuple[float, int, asyncio.Future]] = []
+        fake.clock = lambda: self.now
+
+        async def sleep(seconds: float) -> None:
+            fake.sleeps.append(seconds)
+            await self.wait(seconds)
+
+        fake.sleep = sleep
+
+    async def wait(self, seconds: float) -> None:
+        fut = asyncio.get_running_loop().create_future()
+        self._timers.append((self.now + seconds, len(self._timers), fut))
+        await fut
+
+    def run(self, *coros):
+        async def main():
+            tasks = [asyncio.create_task(c) for c in coros]
+            while not all(t.done() for t in tasks):
+                for _ in range(50):
+                    await asyncio.sleep(0)
+                live = [t for t in self._timers if not t[2].done()]
+                if not live:
+                    assert all(t.done() for t in tasks), "tasks blocked with no timer pending"
+                    break
+                when, _, fut = min(live, key=lambda t: (t[0], t[1]))
+                self.now = max(self.now, when)
+                fut.set_result(None)
+            return [t.result() for t in tasks]
+
+        return asyncio.run(main())
+
+
+def test_second_short_429_does_not_clear_a_longer_hold_from_an_earlier_retried_429():
+    # D's request is in flight for 3 s. Meanwhile A gets "retry after 10" at 1000, so calls are
+    # held to 1010. D's answer (1003) is "retry after 2". D must not clear A's hold when it wakes
+    # at 1005: D's retry and call E (started at 1006) are sent at 1010, not inside A's wait.
+    vt = None
+    sent: list[tuple[str, float]] = []
+    fake = FakeReddit({
+        ("GET", "/search"): [raw(429, b"", {"retry-after": "10"}), ok(listing([]))],
+        ("GET", "/r/x1/hot"): [raw(429, b"", {"retry-after": "2"}), ok(listing([]))],
+        ("GET", "/r/x2/hot"): ok(listing([])),
+    })
+    send = fake._send_raw
+    first_d = []
+
+    async def in_flight(verb, path, params, data, timeout=None):
+        sent.append((path, vt.now))
+        if path == "/r/x1/hot" and not first_d:
+            first_d.append(True)
+            await vt.wait(3)
+        return await send(verb, path, params, data, timeout)
+
+    fake._send_raw = in_flight
+    vt = _VirtualTime(fake)
+
+    async def e_later():
+        await vt.wait(6)
+        return await fake.get("/r/x2/hot")
+
+    results = vt.run(fake.get("/r/x1/hot"), fake.get("/search", q="x"), e_later())
+    assert all(r["kind"] == "Listing" for r in results)
+    assert sent[:2] == [("/r/x1/hot", 1000.0), ("/search", 1000.0)]
+    assert sorted(sent[2:]) == [("/r/x1/hot", 1010.0), ("/r/x2/hot", 1010.0), ("/search", 1010.0)]
+
+
+@pytest.mark.parametrize(
+    "hold, retry_after",
+    [(raw(429, b"", {"retry-after": "120"}), 120), (StatusCodeException(status_code=429), 60)],
+    ids=["given-up-429", "token-endpoint-429"],
+)
+@pytest.mark.parametrize(
+    "d_headers",
+    [{}, {"x-ratelimit-remaining": "50", "x-ratelimit-reset": "500"},
+     {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "5"}],
+    ids=["no-window", "window-with-requests-left", "short-used-up-window"],
+)
+def test_short_429_does_not_clear_another_calls_cool_down_in_force_when_it_arrived(hold, retry_after, d_headers):
+    # D's request is in flight for 3 s; meanwhile B's 429 starts a long cool-down at 1000. D's own
+    # answer (1003) is "retry after 2". Waking at 1005, D must leave B's cool-down alone: its retry
+    # fails locally with the time left, and a call started at 1006 is not sent either. Window
+    # headers on D's own 429 must not replace B's cool-down.
+    vt = None
+    sent: list[tuple[str, float]] = []
+    fake = FakeReddit({
+        ("GET", "/r/x1/hot"): raw(429, b"", {"retry-after": "2", **d_headers}),
+        ("GET", "/search"): hold,
+        ("GET", "/r/x2/hot"): ok(listing([])),
+    })
+    send = fake._send_raw
+
+    async def in_flight(verb, path, params, data, timeout=None):
+        sent.append((path, vt.now))
+        if path == "/r/x1/hot":
+            await vt.wait(3)
+        return await send(verb, path, params, data, timeout)
+
+    fake._send_raw = in_flight
+    vt = _VirtualTime(fake)
+
+    async def expect_held(coro):
+        with pytest.raises(RateLimitedError) as e:
+            await coro
+        return e.value.retry_after
+
+    async def e_later():
+        await vt.wait(6)
+        return await expect_held(fake.get("/r/x2/hot"))
+
+    waits = vt.run(expect_held(fake.get("/r/x1/hot")), expect_held(fake.get("/search", q="x")), e_later())
+    assert sent == [("/r/x1/hot", 1000.0), ("/search", 1000.0)]
+    assert waits == [retry_after - 5, retry_after, retry_after - 6]
+
+
+def test_short_429_on_the_windows_last_request_still_retries_once():
+    # The call spends the window's last request (1 left, resets in 50 s) and gets "retry after 3".
+    # Its own spend is not another call's cool-down: it waits 3 s and retries, as before.
+    window = {"x-ratelimit-remaining": "1", "x-ratelimit-reset": "50"}
+    fake = FakeReddit({
+        ("GET", "/r/x1/hot"): ok(listing([]), headers=window),
+        ("GET", "/search"): [raw(429, b"", {"retry-after": "3"}), ok(listing([]))],
+    })
+    _manual_clock(fake)
+    run(fake.get("/r/x1/hot"))
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert fake.paths() == ["/r/x1/hot", "/search", "/search"] and fake.sleeps == [3.0]
+
+
+def test_retried_429_leaves_no_hold_once_its_retry_succeeds():
+    fake = FakeReddit({("GET", "/search"): [raw(429, b"", {"retry-after": "3"}), ok(listing([])), ok(listing([]))]})
+    _manual_clock(fake)
+    run(fake.get("/search", q="x"))
+    assert fake.rate_limit_status()["remaining"] is None
+    run(fake.get("/search", q="x"))
+    assert len(fake.calls) == 3 and fake.sleeps == [3.0]
+
+
 def test_429_cool_down_never_shortens_a_longer_reset_window():
     headers = {"retry-after": "2", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "40"}
     fake = FakeReddit({("GET", "/search"): raw(429, b"", headers)})

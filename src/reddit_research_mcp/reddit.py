@@ -371,6 +371,7 @@ class RedditClient:
         self._reset_at = 0.0
         self._used: int | None = None
         self._holds = 0  # cool-downs started so far; a call that waited clears only its own window
+        self._hold_until = 0.0  # latest end of a wait Reddit announced with a 429 (any call)
         self._morechildren_lock: asyncio.Lock | None = None
         self.timeout = REQUEST_TIMEOUT
         self.retry_timeout = RETRY_TIMEOUT
@@ -589,6 +590,7 @@ class RedditClient:
                     self._remaining = 0.0
                     self._reset_at = until
                     self._holds += 1
+                    self._hold_until = max(self._hold_until, self.clock() + err.retry_after)
                 raise err from exc
             except Exception as exc:  # pragma: no cover - defensive
                 raise RedditAPIError(
@@ -608,10 +610,28 @@ class RedditClient:
             if status == 429:
                 wait = _parse_retry_after(headers)
                 if attempt == 0 and wait <= MAX_RETRY_WAIT - slept:
+                    # Reddit asked this client, not just this call, to wait: hold other calls
+                    # at the gate for the same time. An empty window that ends later still holds;
+                    # the end of a window with requests left is not a cool-down. Another call's
+                    # cool-down still in force holds too, whatever this 429's window headers say.
+                    wait = max(wait, 0.5)
+                    until = self.clock() + wait
+                    if self._remaining is not None and self._remaining < 1:
+                        until = max(self._reset_at, until)
+                    earlier = self._hold_until  # another call's cool-down, if one is in force
+                    until = max(until, earlier)
+                    self._remaining = 0.0
+                    self._reset_at = until
+                    self._holds += 1
+                    self._hold_until = max(earlier, self.clock() + wait)
                     window, held = self._reset_at, self._holds
-                    await self.sleep(max(wait, 0.5))
-                    slept += max(wait, 0.5)
-                    if self._reset_at == window and self._holds == held:  # no other call's 429 meanwhile
+                    await self.sleep(wait)
+                    slept += wait
+                    if (
+                        self._reset_at == window
+                        and self._holds == held  # no other call's 429 meanwhile
+                        and earlier <= self.clock()  # nor an earlier cool-down that outlasts this wait
+                    ):
                         self._remaining = None  # waited as asked; let the retry through the gate
                     continue
                 # Giving up: hold every later request until Reddit's wait is over, even when the
@@ -619,6 +639,7 @@ class RedditClient:
                 self._remaining = 0.0
                 self._reset_at = max(self._reset_at, self.clock() + min(wait, MAX_RESET_SECONDS))
                 self._holds += 1
+                self._hold_until = max(self._hold_until, self.clock() + min(wait, MAX_RESET_SECONDS))
                 raise RateLimitedError(wait)
             if status == 401 and attempt == 0 and self._drop_token():
                 continue  # the token may have been revoked; fetch a fresh one once

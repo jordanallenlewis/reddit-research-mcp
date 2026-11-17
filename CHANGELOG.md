@@ -32,6 +32,12 @@ All notable changes to this project are documented here. The format follows
   it woke, even if a parallel call had started a 429 cool-down or seen a new used-up window in the
   meantime. It now checks again: it waits on only if its total wait stays within 15 s, and
   otherwise fails locally with the time left, without sending.
+- When Reddit answered 429 with a short `Retry-After` (up to 15 s), only the call that got it
+  waited before retrying; parallel calls kept sending to Reddit during that wait. Calls started
+  during the wait now wait until it is over, or fail locally with the time left when they can't
+  wait that long. A call waking from its own short wait also no longer clears another call's
+  longer 429 cool-down that was already in force when its 429 arrived: it waits that out too, or
+  fails locally with the time left, instead of retrying into it.
 - Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08
