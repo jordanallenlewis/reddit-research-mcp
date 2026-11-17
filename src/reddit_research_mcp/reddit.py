@@ -420,28 +420,33 @@ class RedditClient:
 
         Returns the seconds slept. There is no await between reading and updating the
         counters except the sleep, so concurrent tool calls cannot interleave mid-update.
+        A window or cool-down that changed during the sleep is checked again, with the
+        wait budget left, before anything is sent.
         """
-        if self._remaining is None:
-            return 0.0
-        now = self.clock()
-        if now >= self._reset_at:
-            self._remaining = None
-            return 0.0
-        if self._remaining < 1:
+        slept = 0.0
+        while True:
+            if self._remaining is None:
+                return slept
+            now = self.clock()
+            if now >= self._reset_at:
+                self._remaining = None
+                return slept
+            if self._remaining >= 1:
+                self._remaining -= 1
+                return slept
             wait = self._reset_at - now
-            if wait <= max_wait:
-                window, held = self._reset_at, self._holds
-                await self.sleep(wait)
-                if self._reset_at == window and self._holds == held:  # no 429 meanwhile
-                    self._remaining = None
-                return wait
-            raise RateLimitedError(
-                wait,
-                "The request window is used up (Reddit allows about 100 requests per minute "
-                "per client; anonymous clients share a quota).",
-            )
-        self._remaining -= 1
-        return 0.0
+            if wait > max_wait - slept:
+                raise RateLimitedError(
+                    wait,
+                    "The request window is used up (Reddit allows about 100 requests per minute "
+                    "per client; anonymous clients share a quota).",
+                )
+            window, held = self._reset_at, self._holds
+            await self.sleep(wait)
+            slept += wait
+            if self._reset_at == window and self._holds == held:  # no 429 or new window meanwhile
+                self._remaining = None
+                return slept
 
     # -- transport
 
