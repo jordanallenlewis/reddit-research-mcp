@@ -370,6 +370,7 @@ class RedditClient:
         self._remaining: float | None = None
         self._reset_at = 0.0
         self._used: int | None = None
+        self._holds = 0  # cool-downs started so far; a call that waited clears only its own window
         self._morechildren_lock: asyncio.Lock | None = None
         self.timeout = REQUEST_TIMEOUT
         self.retry_timeout = RETRY_TIMEOUT
@@ -429,9 +430,9 @@ class RedditClient:
         if self._remaining < 1:
             wait = self._reset_at - now
             if wait <= max_wait:
-                window = self._reset_at
+                window, held = self._reset_at, self._holds
                 await self.sleep(wait)
-                if self._reset_at == window:  # a call that hit a 429 meanwhile may have pushed it out
+                if self._reset_at == window and self._holds == held:  # no 429 meanwhile
                     self._remaining = None
                 return wait
             raise RateLimitedError(
@@ -572,7 +573,18 @@ class RedditClient:
                 raise self._auth_failure(exc) from exc
             except StatusCodeException as exc:
                 # Only the token endpoint raises this; API responses are inspected below.
-                raise self._auth_failure(exc) from exc
+                err = self._auth_failure(exc)
+                if isinstance(err, RateLimitedError):
+                    # Hold later requests for the wait we report, so the next call does not ask
+                    # the token endpoint again at once. An empty window that ends later still holds;
+                    # the end of a window with requests left is not a cool-down.
+                    until = self.clock() + err.retry_after
+                    if self._remaining is not None and self._remaining < 1:
+                        until = max(self._reset_at, until)
+                    self._remaining = 0.0
+                    self._reset_at = until
+                    self._holds += 1
+                raise err from exc
             except Exception as exc:  # pragma: no cover - defensive
                 raise RedditAPIError(
                     f"Unexpected error calling Reddit for {verb} {path}: {describe_exception(exc)}"
@@ -591,16 +603,17 @@ class RedditClient:
             if status == 429:
                 wait = _parse_retry_after(headers)
                 if attempt == 0 and wait <= MAX_RETRY_WAIT - slept:
-                    window = self._reset_at
+                    window, held = self._reset_at, self._holds
                     await self.sleep(max(wait, 0.5))
                     slept += max(wait, 0.5)
-                    if self._reset_at == window:  # unless another call's 429 set a longer cool-down meanwhile
+                    if self._reset_at == window and self._holds == held:  # no other call's 429 meanwhile
                         self._remaining = None  # waited as asked; let the retry through the gate
                     continue
                 # Giving up: hold every later request until Reddit's wait is over, even when the
                 # 429 carried no x-ratelimit headers. Never shortens a longer window already known.
                 self._remaining = 0.0
                 self._reset_at = max(self._reset_at, self.clock() + min(wait, MAX_RESET_SECONDS))
+                self._holds += 1
                 raise RateLimitedError(wait)
             if status == 401 and attempt == 0 and self._drop_token():
                 continue  # the token may have been revoked; fetch a fresh one once

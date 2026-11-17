@@ -204,6 +204,135 @@ def test_short_429_wait_in_one_call_does_not_erase_a_longer_cool_down_from_anoth
     assert fake.paths() == ["/search", "/r/x1/hot"]
 
 
+def test_token_endpoint_429_cools_down_later_calls_without_sending():
+    # The token fetch got a 429: later calls must wait it out, not ask the token endpoint again.
+    fake = FakeReddit({("GET", "/search"): StatusCodeException(status_code=429)})
+    now = _manual_clock(fake)
+    with pytest.raises(RateLimitedError, match="token endpoint") as first:
+        run(fake.get("/search", q="x"))
+    assert first.value.retry_after == 60
+    now[0] += 20
+    for _ in range(2):
+        with pytest.raises(RateLimitedError) as e:
+            run(fake.get("/search", q="x"))
+        assert e.value.retry_after == 40
+    assert len(fake.calls) == 1 and fake.sleeps == []
+    assert fake.rate_limit_status()["remaining"] == 0
+
+
+def test_requests_flow_again_once_the_token_endpoint_cool_down_is_over():
+    fake = FakeReddit({("GET", "/search"): [StatusCodeException(status_code=429), ok(listing([]))]})
+    now = _manual_clock(fake)
+    with pytest.raises(RateLimitedError):
+        run(fake.get("/search", q="x"))
+    now[0] += 60
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert len(fake.calls) == 2 and fake.sleeps == []
+
+
+def test_token_endpoint_429_never_shortens_a_longer_known_cool_down():
+    # The last request of a window that resets in 300 s gets a token 429: the empty window still holds.
+    window = {"x-ratelimit-remaining": "1", "x-ratelimit-reset": "300"}
+    fake = FakeReddit({
+        ("GET", "/r/x1/hot"): ok(listing([]), headers=window),
+        ("GET", "/search"): StatusCodeException(status_code=429),
+    })
+    now = _manual_clock(fake)
+    run(fake.get("/r/x1/hot"))
+    with pytest.raises(RateLimitedError, match="token endpoint"):
+        run(fake.get("/search", q="x"))
+    now[0] += 100
+    with pytest.raises(RateLimitedError) as e:
+        run(fake.get("/r/x1/hot"))
+    assert e.value.retry_after == 200 and fake.paths() == ["/r/x1/hot", "/search"]
+
+
+def test_token_endpoint_429_holds_60_s_not_to_the_end_of_a_window_with_requests_left():
+    # A window with 50 requests left that resets in 500 s is not a cool-down: hold only 60 s.
+    window = {"x-ratelimit-remaining": "50", "x-ratelimit-reset": "500"}
+    fake = FakeReddit({
+        ("GET", "/r/x1/hot"): ok(listing([]), headers=window),
+        ("GET", "/search"): [StatusCodeException(status_code=429), ok(listing([]))],
+    })
+    now = _manual_clock(fake)
+    run(fake.get("/r/x1/hot"))
+    with pytest.raises(RateLimitedError, match="retry after 60 s"):
+        run(fake.get("/search", q="x"))
+    now[0] += 30
+    with pytest.raises(RateLimitedError) as e:
+        run(fake.get("/search", q="x"))
+    assert e.value.retry_after == 30
+    now[0] += 30
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert fake.paths() == ["/r/x1/hot", "/search", "/search"] and fake.sleeps == []
+
+
+def test_waking_429_retry_does_not_clear_a_token_endpoint_cool_down_from_another_call():
+    # Call A sleeps 2 s before retrying a short 429; meanwhile call B's token fetch gets a 429.
+    # A known window (50 left, resets in 500 s) is in force. When A wakes, B's cool-down must hold.
+    window = {"x-ratelimit-remaining": "50", "x-ratelimit-reset": "500"}
+    fake = FakeReddit({
+        ("GET", "/r/x0/hot"): ok(listing([]), headers=window),
+        ("GET", "/search"): raw(429, b"", {"retry-after": "2", **window}),
+        ("GET", "/r/x1/hot"): StatusCodeException(status_code=429),
+    })
+    now = _manual_clock(fake)
+    run(fake.get("/r/x0/hot"))
+    other_ran = []
+
+    async def sleep(seconds: float) -> None:
+        fake.sleeps.append(seconds)
+        if not other_ran:
+            other_ran.append(True)
+            with pytest.raises(RateLimitedError, match="token endpoint"):
+                await fake.get("/r/x1/hot")
+        now[0] += seconds
+
+    fake.sleep = sleep
+    with pytest.raises(RateLimitedError):
+        run(fake.get("/search", q="x"))
+    with pytest.raises(RateLimitedError):
+        run(fake.get("/r/x1/hot"))
+    assert fake.paths() == ["/r/x0/hot", "/search", "/r/x1/hot"]
+
+
+def test_other_token_endpoint_failures_do_not_start_a_cool_down():
+    fake = FakeReddit({
+        ("GET", "/search"): [ClientCredentialsError("Check your client credentials"), ok(listing([]))]
+    })
+    _manual_clock(fake)
+    with pytest.raises(AuthError):
+        run(fake.get("/search", q="x"))
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert fake.rate_limit_status()["remaining"] is None
+
+
+def test_waking_429_retry_keeps_a_token_cool_down_that_left_the_window_end_unchanged():
+    # As above, but B's request is the window's last one (resets in 500 s), so B's cool-down keeps
+    # the window's end. A must still see that a cool-down started while it slept.
+    fake = FakeReddit({
+        ("GET", "/r/x0/hot"): ok(listing([]), headers={"x-ratelimit-remaining": "2", "x-ratelimit-reset": "500"}),
+        ("GET", "/search"): [raw(429, b"", {"retry-after": "2"}), ok(listing([]))],
+        ("GET", "/r/x1/hot"): StatusCodeException(status_code=429),
+    })
+    now = _manual_clock(fake)
+    run(fake.get("/r/x0/hot"))
+    other_ran = []
+
+    async def sleep(seconds: float) -> None:
+        fake.sleeps.append(seconds)
+        if not other_ran:
+            other_ran.append(True)
+            with pytest.raises(RateLimitedError, match="token endpoint"):
+                await fake.get("/r/x1/hot")
+        now[0] += seconds
+
+    fake.sleep = sleep
+    with pytest.raises(RateLimitedError):
+        run(fake.get("/search", q="x"))
+    assert fake.paths() == ["/r/x0/hot", "/search", "/r/x1/hot"]
+
+
 def test_429_cool_down_never_shortens_a_longer_reset_window():
     headers = {"retry-after": "2", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "40"}
     fake = FakeReddit({("GET", "/search"): raw(429, b"", headers)})
