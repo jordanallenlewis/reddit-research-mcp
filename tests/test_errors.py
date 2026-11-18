@@ -677,6 +677,162 @@ def test_short_429_does_not_clear_another_calls_cool_down_in_force_when_it_arriv
     assert waits == [retry_after - 5, retry_after, retry_after - 6]
 
 
+@pytest.mark.parametrize(
+    "hold, retry_after",
+    [(raw(429, b"", {"retry-after": "120"}), 120), (StatusCodeException(status_code=429), 60)],
+    ids=["given-up-429", "token-endpoint-429"],
+)
+@pytest.mark.parametrize(
+    "d_headers",
+    [{"x-ratelimit-remaining": "50", "x-ratelimit-reset": "500"},
+     {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1"},
+     {"x-ratelimit-remaining": "3", "x-ratelimit-reset": "2"}],
+    ids=["window-with-requests-left", "used-up-window-ending-sooner", "short-window-with-requests-left"],
+)
+def test_window_headers_from_a_call_in_flight_do_not_lift_another_calls_cool_down(hold, retry_after, d_headers):
+    # D's request is in flight for 3 s; meanwhile B's 429 starts a long cool-down at 1000. D's own
+    # answer (1003) is a 200 whose window headers say requests are left, or that the window ends
+    # sooner. Reddit's request to wait still stands: a call started at 1006 is not sent.
+    vt = None
+    sent: list[tuple[str, float]] = []
+    fake = FakeReddit({
+        ("GET", "/r/x1/hot"): ok(listing([]), headers=d_headers),
+        ("GET", "/search"): hold,
+        ("GET", "/r/x2/hot"): ok(listing([])),
+    })
+    send = fake._send_raw
+
+    async def in_flight(verb, path, params, data, timeout=None):
+        sent.append((path, vt.now))
+        if path == "/r/x1/hot":
+            await vt.wait(3)
+        return await send(verb, path, params, data, timeout)
+
+    fake._send_raw = in_flight
+    vt = _VirtualTime(fake)
+
+    async def expect_held(coro):
+        with pytest.raises(RateLimitedError) as e:
+            await coro
+        return e.value
+
+    async def e_later():
+        await vt.wait(6)
+        return await expect_held(fake.get("/r/x2/hot"))
+
+    d, b, e = vt.run(fake.get("/r/x1/hot"), expect_held(fake.get("/search", q="x")), e_later())
+    assert d["kind"] == "Listing"
+    assert sent == [("/r/x1/hot", 1000.0), ("/search", 1000.0)]
+    assert b.retry_after == retry_after and e.retry_after == retry_after - 6
+    assert "asked this client to wait" in str(e) and "window is used up" not in str(e)
+
+
+def test_window_headers_from_a_call_in_flight_do_not_cut_a_retried_429s_wait():
+    # A gets "retry after 10" at 1000 and sleeps before its retry, so calls are held to 1010. D's
+    # request, in flight since 1000, answers at 1003 with a 200 saying 50 requests are left. E
+    # starts at 1004: it waits at the gate and is sent at 1010 with A's retry, not at 1004.
+    vt = None
+    sent: list[tuple[str, float]] = []
+    fake = FakeReddit({
+        ("GET", "/search"): [raw(429, b"", {"retry-after": "10"}), ok(listing([]))],
+        ("GET", "/r/x1/hot"): ok(listing([]), headers={"x-ratelimit-remaining": "50", "x-ratelimit-reset": "500"}),
+        ("GET", "/r/x2/hot"): ok(listing([])),
+    })
+    send = fake._send_raw
+
+    async def in_flight(verb, path, params, data, timeout=None):
+        sent.append((path, vt.now))
+        if path == "/r/x1/hot":
+            await vt.wait(3)
+        return await send(verb, path, params, data, timeout)
+
+    fake._send_raw = in_flight
+    vt = _VirtualTime(fake)
+
+    async def e_later():
+        await vt.wait(4)
+        return await fake.get("/r/x2/hot")
+
+    results = vt.run(fake.get("/r/x1/hot"), fake.get("/search", q="x"), e_later())
+    assert all(r["kind"] == "Listing" for r in results)
+    assert sent[:2] == [("/r/x1/hot", 1000.0), ("/search", 1000.0)]
+    assert sorted(sent[2:]) == [("/r/x2/hot", 1010.0), ("/search", 1010.0)]
+
+
+def test_call_waiting_out_a_cool_down_fails_locally_when_the_wait_is_over_its_budget():
+    # A token-endpoint 429 holds calls for 60 s. A 200 already in flight says the window has
+    # requests left. A call made 50 s later would wait 10 s: within the 15 s budget, so it waits
+    # and is sent at the end of the hold. A call made at once would wait 60 s: it fails locally.
+    vt = None
+    sent: list[tuple[str, float]] = []
+    fake = FakeReddit({
+        ("GET", "/r/x1/hot"): ok(listing([]), headers={"x-ratelimit-remaining": "50", "x-ratelimit-reset": "500"}),
+        ("GET", "/search"): [StatusCodeException(status_code=429), ok(listing([]))],
+    })
+    send = fake._send_raw
+
+    async def in_flight(verb, path, params, data, timeout=None):
+        sent.append((path, vt.now))
+        if path == "/r/x1/hot":
+            await vt.wait(1)
+        return await send(verb, path, params, data, timeout)
+
+    fake._send_raw = in_flight
+    vt = _VirtualTime(fake)
+
+    async def held_now():
+        with pytest.raises(RateLimitedError) as e:
+            await fake.get("/search", q="x")
+        await vt.wait(2)
+        with pytest.raises(RateLimitedError) as again:
+            await fake.get("/search", q="x")
+        return e.value.retry_after, again.value.retry_after
+
+    async def later():
+        await vt.wait(50)
+        return await fake.get("/search", q="x")
+
+    d, waits, last = vt.run(fake.get("/r/x1/hot"), held_now(), later())
+    assert d["kind"] == "Listing" and last["kind"] == "Listing"
+    assert waits == (60, 58)
+    assert sent == [("/r/x1/hot", 1000.0), ("/search", 1000.0), ("/search", 1060.0)]
+
+
+def _early_waking_clock(fake: FakeReddit, start: float = 1000.0, early: float = 1e-6) -> list[float]:
+    """Like _manual_clock, but every sleep ends a hair early, as event-loop timers may."""
+    now = _manual_clock(fake, start)
+
+    async def sleep(seconds: float) -> None:
+        fake.sleeps.append(seconds)
+        now[0] += seconds - early
+
+    fake.sleep = sleep
+    return now
+
+
+def test_429_retry_that_spends_the_whole_wait_budget_is_sent_after_an_early_wake():
+    # "retry after 15" uses the whole 15 s budget. The sleep ends a microsecond early: the call
+    # has served its own wait, so its retry is sent rather than failing over that microsecond.
+    fake = FakeReddit({("GET", "/search"): [raw(429, b"", {"retry-after": "15"}), ok(listing([]))]})
+    _early_waking_clock(fake)
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert len(fake.calls) == 2 and fake.sleeps == [15.0]
+
+
+def test_call_that_waits_out_a_cool_down_with_its_whole_budget_is_sent_after_an_early_wake():
+    # A token-endpoint 429 holds calls for 60 s; then a response that was already in flight says
+    # the window has requests left (so only the cool-down holds). A call made 45 s later waits the
+    # last 15 s (its whole budget); the sleep ends a microsecond early, and the call is still sent.
+    fake = FakeReddit({("GET", "/search"): [StatusCodeException(status_code=429), ok(listing([]))]})
+    now = _early_waking_clock(fake)
+    with pytest.raises(RateLimitedError):
+        run(fake.get("/search", q="x"))
+    fake._note_limits({"x-ratelimit-remaining": "50", "x-ratelimit-reset": "500"})  # the in-flight answer
+    now[0] += 45
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert len(fake.calls) == 2 and fake.sleeps == [15.0]
+
+
 def test_short_429_on_the_windows_last_request_still_retries_once():
     # The call spends the window's last request (1 left, resets in 50 s) and gets "retry after 3".
     # Its own spend is not another call's cool-down: it waits 3 s and retries, as before.
@@ -725,6 +881,7 @@ def test_exhausted_window_fails_fast_without_a_request():
         run(fake.get("/search", q="x"))
     assert len(fake.calls) == 1 and fake.sleeps == []
     assert 190 <= e.value.retry_after <= 200
+    assert "window is used up" in str(e.value) and "asked this client to wait" not in str(e.value)
 
 
 def test_nearly_reset_window_waits_briefly():

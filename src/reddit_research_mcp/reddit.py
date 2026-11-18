@@ -416,36 +416,45 @@ class RedditClient:
         if used is not None:
             self._used = int(used)
 
-    async def _gate(self, max_wait: float = MAX_RETRY_WAIT) -> float:
+    async def _gate(self, max_wait: float = MAX_RETRY_WAIT, served: float = 0.0) -> float:
         """Spend one request from the window; wait up to max_wait s or fail fast when it is empty.
 
         Returns the seconds slept. There is no await between reading and updating the
         counters except the sleep, so concurrent tool calls cannot interleave mid-update.
         A window or cool-down that changed during the sleep is checked again, with the
-        wait budget left, before anything is sent.
+        wait budget left, before anything is sent. A 429 cool-down (_hold_until) holds
+        whatever window headers other responses brought meanwhile; served is the end of
+        a cool-down the caller has already slept through, so it is not waited for again.
         """
         slept = 0.0
         while True:
-            if self._remaining is None:
-                return slept
             now = self.clock()
-            if now >= self._reset_at:
+            hold = self._hold_until - now if self._hold_until > served else 0.0
+            if self._remaining is not None and now >= self._reset_at:
                 self._remaining = None
+            empty = self._remaining is not None and self._remaining < 1
+            if hold <= 0 and not empty:
+                if self._remaining is not None:
+                    self._remaining -= 1
                 return slept
-            if self._remaining >= 1:
-                self._remaining -= 1
-                return slept
-            wait = self._reset_at - now
+            wait = max(hold, self._reset_at - now if empty else 0.0)
             if wait > max_wait - slept:
+                if hold >= wait:
+                    raise RateLimitedError(
+                        wait,
+                        "Reddit asked this client to wait (HTTP 429); requests are held until "
+                        "then.",
+                    )
                 raise RateLimitedError(
                     wait,
                     "The request window is used up (Reddit allows about 100 requests per minute "
                     "per client; anonymous clients share a quota).",
                 )
-            window, held = self._reset_at, self._holds
+            window, held, hold_end = self._reset_at, self._holds, self._hold_until
             await self.sleep(wait)
             slept += wait
-            if self._reset_at == window and self._holds == held:  # no 429 or new window meanwhile
+            served = max(served, hold_end)  # slept through the cool-down known before the sleep
+            if empty and self._reset_at == window and self._holds == held:  # no 429 or new window meanwhile
                 self._remaining = None
                 return slept
 
@@ -537,8 +546,9 @@ class RedditClient:
         form = None if data is None else {k: str(v) for k, v in data.items() if v is not None}
 
         slept = 0.0  # rate-limit waiting so far; all of it together stays within MAX_RETRY_WAIT
+        served = 0.0  # end of this call's own 429 wait, already slept through before its retry
         for attempt in (0, 1):
-            slept += await self._gate(MAX_RETRY_WAIT - slept)
+            slept += await self._gate(MAX_RETRY_WAIT - slept, served)
             started = self.clock()
             self.request_count += 1
             tally = CALL_TALLY.get()
@@ -623,7 +633,8 @@ class RedditClient:
                     self._remaining = 0.0
                     self._reset_at = until
                     self._holds += 1
-                    self._hold_until = max(earlier, self.clock() + wait)
+                    served = self.clock() + wait
+                    self._hold_until = max(earlier, served)
                     window, held = self._reset_at, self._holds
                     await self.sleep(wait)
                     slept += wait

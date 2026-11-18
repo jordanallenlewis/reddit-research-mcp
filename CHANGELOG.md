@@ -38,6 +38,11 @@ All notable changes to this project are documented here. The format follows
   wait that long. A call waking from its own short wait also no longer clears another call's
   longer 429 cool-down that was already in force when its 429 arrived: it waits that out too, or
   fails locally with the time left, instead of retrying into it.
+- A response from a call that was already in flight could lift or shorten a 429 cool-down
+  another call had started: its `x-ratelimit-*` headers replaced the held window, so later
+  calls went out while Reddit had asked this client to wait. A cool-down now holds whatever
+  window headers arrive meanwhile, and a call held by one is told that Reddit asked this
+  client to wait, not that the request window is used up.
 - A redd.it link with a reddit.com-style path (`redd.it/r/<sub>/comments/<id>/...`,
   `redd.it/comments/<id>`, `redd.it/r/<sub>/s/<code>`) was read as a post id made of its
   first word (`r`, `comments`), so tools fetched an unrelated post. Links longer than
