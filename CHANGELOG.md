@@ -48,6 +48,11 @@ All notable changes to this project are documented here. The format follows
   first word (`r`, `comments`), so tools fetched an unrelated post. Links longer than
   `redd.it/<id>` are now read like reddit.com links: the post id, the share-link error, or
   "not a post" (an article lookup in `find_other_discussions`).
+- After waiting out its own `429`, a call's retry reopened a request window that was used up
+  (Reddit's `x-ratelimit-remaining: 0`, or the window's last request spent), so other calls went
+  out inside that window, some while the retry was still in flight. Only the retry Reddit asked for now passes the used-up
+  window, once; every other call still waits for the window to reset, or fails locally with
+  the time left.
 - A share link with a doubled slash in its path (`redd.it//r/<sub>/s/<code>`,
   `reddit.com/r/<sub>//s/<code>`) got "not a post", or in `find_other_discussions` was looked up
   as an article. Doubled slashes in a share-link path are now read as one, so these links get
