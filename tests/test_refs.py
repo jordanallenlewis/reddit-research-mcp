@@ -47,6 +47,9 @@ from reddit_research_mcp.refs import (
         ("https://redd.it/r", PostRef("r")),  # bare ids that spell a path word are still ids
         ("redd.it/USER", PostRef("user")),
         ("https://redd.it/u", PostRef("u")),
+        ("https://redd.it//abc123", PostRef("abc123")),  # doubled slashes read as one
+        ("https://redd.it//r/testsub//comments/abc123/slug/", PostRef("abc123")),
+        ("https://www.reddit.com/r/testsub/comments//abc123/slug/", PostRef("abc123")),
     ],
 )
 def test_parse_post_ref(raw, expected):
@@ -75,6 +78,10 @@ def test_parse_post_ref(raw, expected):
         ("https://redd.it/tb/abc123", "not a post"),
         ("https://redd.it/link/abc123", "not a post"),
         ("https://redd.it/s/abc", "not a post"),
+        ("https://redd.it//r/testsub/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com//r/testsub/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com/r/testsub//s/AbCdEf123/", "share link"),
+        ("https://redd.it//s/abc", "not a post"),
         ("not an id!", "valid post id"),
     ],
 )
@@ -203,6 +210,8 @@ def test_discussion_target():
         "https://www.reddit.com/U/someone/s/AbCdEf123",
         "https://www.reddit.com/USER/someone/S/AbCdEf123",
         "https://redd.it/r/testsub/s/AbCdEf123",
+        "https://redd.it//r/testsub/s/AbCdEf123",
+        "https://www.reddit.com/u//someone/s/AbCdEf123",
     ],
 )
 def test_discussion_target_share_link(raw):
@@ -219,6 +228,7 @@ def test_discussion_target_share_link(raw):
         "https://www.reddit.com/user/s/submitted/",  # a user named "s"
         "https://www.reddit.com/r/testsub/wiki/s/abc",
         "https://www.reddit.com/r/testsub/wiki/u/someone/s/abc",  # looks like one, deeper in the path
+        "https://www.reddit.com/r/testsub//wiki//s/abc",  # doubled slashes do not hide the wiki
     ],
 )
 def test_discussion_target_near_share_link_is_a_url(raw):
