@@ -48,6 +48,10 @@ All notable changes to this project are documented here. The format follows
   first word (`r`, `comments`), so tools fetched an unrelated post. Links longer than
   `redd.it/<id>` are now read like reddit.com links: the post id, the share-link error, or
   "not a post" (an article lookup in `find_other_discussions`).
+- A Reddit or redd.it link with a doubled slash in its path (`redd.it//r/<sub>/s/<code>`,
+  `reddit.com/r/<sub>/comments//<id>`) was "not a post" or was looked up as an article. Doubled
+  slashes are now read as one, as browsers and Reddit do, so these links give the post or the
+  share-link error.
 - Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08

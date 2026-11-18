@@ -164,6 +164,7 @@ def normalize_subreddit(
 
 def _post_from_url(s: str, raw: str, arg: str) -> PostRef:
     host, path = _split_url(s, raw, arg)
+    path = re.sub(r"/{2,}", "/", path)  # browsers and Reddit read "//" as "/"
     if host in _MEDIA_HOSTS:
         raise InputError(
             f"{arg} {_q(raw)} is a media file URL, not a post; use find_other_discussions "
@@ -196,6 +197,7 @@ def _post_from_url(s: str, raw: str, arg: str) -> PostRef:
 
 def _is_share_path(path: str) -> bool:
     """True for the path of a share link: /r/<sub>/s/<code> or /u/<name>/s/<code>."""
+    path = re.sub(r"/{2,}", "/", path)
     return bool(re.fullmatch(r"/(?:r|u|user)/[^/]+/s/[A-Za-z0-9]+/?", path, re.I))
 
 
