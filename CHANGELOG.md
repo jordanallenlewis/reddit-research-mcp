@@ -43,6 +43,11 @@ All notable changes to this project are documented here. The format follows
   calls went out while Reddit had asked this client to wait. A cool-down now holds whatever
   window headers arrive meanwhile, and a call held by one is told that Reddit asked this
   client to wait, not that the request window is used up.
+- A redd.it link with a reddit.com-style path (`redd.it/r/<sub>/comments/<id>/...`,
+  `redd.it/comments/<id>`, `redd.it/r/<sub>/s/<code>`) was read as a post id made of its
+  first word (`r`, `comments`), so tools fetched an unrelated post. Links longer than
+  `redd.it/<id>` are now read like reddit.com links: the post id, the share-link error, or
+  "not a post" (an article lookup in `find_other_discussions`).
 - Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08
