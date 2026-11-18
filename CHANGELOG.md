@@ -38,6 +38,11 @@ All notable changes to this project are documented here. The format follows
   wait that long. A call waking from its own short wait also no longer clears another call's
   longer 429 cool-down that was already in force when its 429 arrived: it waits that out too, or
   fails locally with the time left, instead of retrying into it.
+- A response from a call that was already in flight could lift or shorten a 429 cool-down
+  another call had started: its `x-ratelimit-*` headers replaced the held window, so later
+  calls went out while Reddit had asked this client to wait. A cool-down now holds whatever
+  window headers arrive meanwhile, and a call held by one is told that Reddit asked this
+  client to wait, not that the request window is used up.
 - Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08
