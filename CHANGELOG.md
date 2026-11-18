@@ -48,6 +48,11 @@ All notable changes to this project are documented here. The format follows
   first word (`r`, `comments`), so tools fetched an unrelated post. Links longer than
   `redd.it/<id>` are now read like reddit.com links: the post id, the share-link error, or
   "not a post" (an article lookup in `find_other_discussions`).
+- After waiting out its own `429`, a call's retry reopened a request window that was used up
+  (Reddit's `x-ratelimit-remaining: 0`, or the window's last request spent), so other calls went
+  out inside that window, some while the retry was still in flight. Only the retry Reddit asked for now passes the used-up
+  window, once; every other call still waits for the window to reset, or fails locally with
+  the time left.
 - Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08

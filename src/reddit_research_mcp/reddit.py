@@ -416,7 +416,9 @@ class RedditClient:
         if used is not None:
             self._used = int(used)
 
-    async def _gate(self, max_wait: float = MAX_RETRY_WAIT, served: float = 0.0) -> float:
+    async def _gate(
+        self, max_wait: float = MAX_RETRY_WAIT, served: float = 0.0, waive_window: bool = False
+    ) -> float:
         """Spend one request from the window; wait up to max_wait s or fail fast when it is empty.
 
         Returns the seconds slept. There is no await between reading and updating the
@@ -425,6 +427,9 @@ class RedditClient:
         wait budget left, before anything is sent. A 429 cool-down (_hold_until) holds
         whatever window headers other responses brought meanwhile; served is the end of
         a cool-down the caller has already slept through, so it is not waited for again.
+        waive_window lets the one retry Reddit asked for (after this call's own 429 wait) pass
+        a used-up window without reopening it for other calls; it applies only if nothing
+        else holds the call when it arrives here, never after a sleep.
         """
         slept = 0.0
         while True:
@@ -433,6 +438,9 @@ class RedditClient:
             if self._remaining is not None and now >= self._reset_at:
                 self._remaining = None
             empty = self._remaining is not None and self._remaining < 1
+            if waive_window and empty and hold <= 0:
+                return slept  # the window stays used up for every other call
+            waive_window = False
             if hold <= 0 and not empty:
                 if self._remaining is not None:
                     self._remaining -= 1
@@ -547,8 +555,9 @@ class RedditClient:
 
         slept = 0.0  # rate-limit waiting so far; all of it together stays within MAX_RETRY_WAIT
         served = 0.0  # end of this call's own 429 wait, already slept through before its retry
+        waive = False  # this call's retry may pass a used-up window once (Reddit asked for it)
         for attempt in (0, 1):
-            slept += await self._gate(MAX_RETRY_WAIT - slept, served)
+            slept += await self._gate(MAX_RETRY_WAIT - slept, served, waive)
             started = self.clock()
             self.request_count += 1
             tally = CALL_TALLY.get()
@@ -643,7 +652,7 @@ class RedditClient:
                         and self._holds == held  # no other call's 429 meanwhile
                         and earlier <= self.clock()  # nor an earlier cool-down that outlasts this wait
                     ):
-                        self._remaining = None  # waited as asked; let the retry through the gate
+                        waive = True  # waited as asked; only this retry passes the used-up window
                     continue
                 # Giving up: hold every later request until Reddit's wait is over, even when the
                 # 429 carried no x-ratelimit headers. Never shortens a longer window already known.
