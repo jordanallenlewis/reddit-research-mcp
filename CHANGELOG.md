@@ -53,6 +53,10 @@ All notable changes to this project are documented here. The format follows
   out inside that window, some while the retry was still in flight. Only the retry Reddit asked for now passes the used-up
   window, once; every other call still waits for the window to reset, or fails locally with
   the time left.
+- A share link with a doubled slash in its path (`redd.it//r/<sub>/s/<code>`,
+  `reddit.com/r/<sub>//s/<code>`) got "not a post", or in `find_other_discussions` was looked up
+  as an article. Doubled slashes in a share-link path are now read as one, so these links get
+  the share-link error too.
 - Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08
