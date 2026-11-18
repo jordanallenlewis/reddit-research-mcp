@@ -38,6 +38,11 @@ All notable changes to this project are documented here. The format follows
   wait that long. A call waking from its own short wait also no longer clears another call's
   longer 429 cool-down that was already in force when its 429 arrived: it waits that out too, or
   fails locally with the time left, instead of retrying into it.
+- A redd.it link with a reddit.com-style path (`redd.it/r/<sub>/comments/<id>/...`,
+  `redd.it/comments/<id>`, `redd.it/r/<sub>/s/<code>`) was read as a post id made of its
+  first word (`r`, `comments`), so tools fetched an unrelated post. Links longer than
+  `redd.it/<id>` are now read like reddit.com links: the post id, the share-link error, or
+  "not a post" (an article lookup in `find_other_discussions`).
 - Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08
