@@ -49,7 +49,10 @@ from reddit_research_mcp.refs import (
         ("https://redd.it/u", PostRef("u")),
         ("https://redd.it//abc123", PostRef("abc123")),  # doubled slashes read as one
         ("https://redd.it//r/testsub//comments/abc123/slug/", PostRef("abc123")),
-        ("https://www.reddit.com/r/testsub/comments//abc123/slug/", PostRef("abc123")),
+        # An empty slug is still a slug: the comment id after it is kept.
+        ("https://www.reddit.com/comments/abc123//def456/", PostRef("abc123", "def456")),
+        ("https://www.reddit.com/r/testsub/comments/abc123//def456/?context=3", PostRef("abc123", "def456")),
+        ("https://redd.it/r/testsub/comments/abc123//def456", PostRef("abc123", "def456")),
     ],
 )
 def test_parse_post_ref(raw, expected):
@@ -98,6 +101,7 @@ def test_parse_post_ref_errors(raw, fragment):
         ("def456", "def456"),
         ("t1_DEF456", "def456"),
         ("https://www.reddit.com/r/testsub/comments/abc123/slug/def456/", "def456"),
+        ("https://www.reddit.com/comments/abc123//def456/", "def456"),
     ],
 )
 def test_parse_comment_id(raw, expected):
@@ -237,6 +241,11 @@ def test_discussion_target_near_share_link_is_a_url(raw):
 
 def test_discussion_target_reddit_style_redd_it_link_is_its_post():
     assert parse_discussion_target("https://redd.it/r/testsub/comments/abc123/slug/").post == PostRef("abc123")
+
+
+def test_discussion_target_keeps_the_comment_of_an_empty_slug_permalink():
+    target = parse_discussion_target("https://www.reddit.com/comments/abc123//def456/")
+    assert target.post == PostRef("abc123", "def456")
 
 
 def test_comment_id_from_reddit_style_redd_it_permalink():
