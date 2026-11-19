@@ -21,6 +21,8 @@ _USER = re.compile(r"[A-Za-z0-9_-]{1,20}")
 _WIKI_SEGMENT = re.compile(r"[A-Za-z0-9_\-.:]+")
 _MEDIA_HOSTS = ("i.redd.it", "v.redd.it", "preview.redd.it", "external-preview.redd.it")
 _REDDIT_HOST = re.compile(r"(?:[a-z0-9-]+\.)*reddit\.com")
+# Path words that are not post ids on redd.it (ids that long are not issued yet).
+_REDDIT_PATH_WORDS = frozenset({"comments", "gallery"})
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 _URL_FORBIDDEN = re.compile(r"[\s\x00-\x1f\x7f\\]")  # whitespace, controls, backslash
 
@@ -173,21 +175,35 @@ def _post_from_url(s: str, raw: str, arg: str) -> PostRef:
             "or a reddit.com / redd.it post link. For an external article use find_other_discussions"
         )
     if host == "redd.it":
-        seg = path.strip("/").split("/")[0]
-        return _post_ref(seg, None, raw, arg)
+        segs = path.strip("/").split("/")
+        if len(segs) == 1 and segs[0].lower() not in _REDDIT_PATH_WORDS:
+            return _post_ref(segs[0], None, raw, arg)
+        # A real short link is redd.it/<id>. Anything longer is a reddit.com-style path
+        # (redd.it/r/<sub>/comments/<id>, redd.it/tb/<id>): read it by the same rules, never
+        # as a post whose id is its first word.
     m = re.search(r"/comments/([0-9a-z]+)(?:/[^/]*)?(?:/([0-9a-z]+))?", path, re.I)
     if m:
         return _post_ref(m.group(1), m.group(2), raw, arg)
     m = re.search(r"/gallery/([0-9a-z]+)", path, re.I)
     if m:
         return _post_ref(m.group(1), None, raw, arg)
-    if re.search(r"/r/[^/]+/s/[A-Za-z0-9]+", path):
-        raise InputError(
-            f"{arg} {_q(raw)} is a share link (/s/...), which the API cannot resolve. Open it in a "
-            "browser and pass the /comments/ URL it redirects to"
-        )
+    if _is_share_path(path):
+        raise _share_link_error(raw, arg)
     raise InputError(
         f"{arg} {_q(raw)} is a Reddit URL but not a post; post URLs contain /comments/<id>/"
+    )
+
+
+def _is_share_path(path: str) -> bool:
+    """True for the path of a share link: /r/<sub>/s/<code> or /u/<name>/s/<code>."""
+    path = re.sub(r"/{2,}", "/", path)
+    return bool(re.fullmatch(r"/(?:r|u|user)/[^/]+/s/[A-Za-z0-9]+/?", path, re.I))
+
+
+def _share_link_error(raw: object, arg: str) -> InputError:
+    return InputError(
+        f"{arg} {_q(raw)} is a share link (/s/...), which the API cannot resolve. Open it in a "
+        "browser and pass the /comments/ URL it redirects to"
     )
 
 
@@ -388,12 +404,15 @@ def parse_discussion_target(raw: str | None, *, arg: str = "post_or_url") -> Dis
     if not s:
         raise InputError(f"{arg} is empty; pass a post id, a Reddit post URL or an article URL")
     if _looks_like_url(s):
-        host, _ = _split_url(s, raw, arg)
+        host, path = _split_url(s, raw, arg)
         if _is_reddit_host(host):
             try:
                 return DiscussionTarget(post=parse_post_ref(s, arg=arg))
             except InputError:
-                pass
+                # Nothing on Reddit links to a share link, so looking it up as an article
+                # would only come back empty: say what to pass instead.
+                if _is_share_path(path):
+                    raise _share_link_error(raw, arg) from None
         return DiscussionTarget(url=_external_url(s, raw, arg))
     if "." in s and "/" in s and not re.search(r"\s", s):
         return DiscussionTarget(url=_external_url(s, raw, arg))

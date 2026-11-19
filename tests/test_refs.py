@@ -38,6 +38,21 @@ from reddit_research_mcp.refs import (
         ("redd.it/abc123", PostRef("abc123")),
         ("https://www.reddit.com/gallery/abc123", PostRef("abc123")),
         ("<https://redd.it/abc123>", PostRef("abc123")),
+        ("https://redd.it/abc123/", PostRef("abc123")),
+        ("https://redd.it/r/testsub/comments/abc123/some_slug/", PostRef("abc123")),
+        ("https://redd.it/r/testsub/comments/abc123/some_slug/def456/", PostRef("abc123", "def456")),
+        ("redd.it/comments/abc123", PostRef("abc123")),
+        ("https://REDD.IT/Comments/ABC123", PostRef("abc123")),
+        ("https://redd.it/gallery/abc123", PostRef("abc123")),
+        ("https://redd.it/r", PostRef("r")),  # bare ids that spell a path word are still ids
+        ("redd.it/USER", PostRef("user")),
+        ("https://redd.it/u", PostRef("u")),
+        ("https://redd.it//abc123", PostRef("abc123")),  # doubled slashes read as one
+        ("https://redd.it//r/testsub//comments/abc123/slug/", PostRef("abc123")),
+        # An empty slug is still a slug: the comment id after it is kept.
+        ("https://www.reddit.com/comments/abc123//def456/", PostRef("abc123", "def456")),
+        ("https://www.reddit.com/r/testsub/comments/abc123//def456/?context=3", PostRef("abc123", "def456")),
+        ("https://redd.it/r/testsub/comments/abc123//def456", PostRef("abc123", "def456")),
     ],
 )
 def test_parse_post_ref(raw, expected):
@@ -53,7 +68,23 @@ def test_parse_post_ref(raw, expected):
         ("https://example.com/article", "not a Reddit post URL"),
         ("https://i.redd.it/picture.jpg", "media file URL"),
         ("https://www.reddit.com/r/testsub/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com/u/someone/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com/user/someone/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com/R/testsub/s/AbCdEf123", "share link"),
+        ("https://reddit.com/r/testsub/s/AbCdEf123?share_id=x", "share link"),
         ("https://www.reddit.com/r/testsub/", "not a post"),
+        ("https://redd.it/r/testsub/s/AbCdEf123", "share link"),
+        ("https://redd.it/u/someone/s/AbCdEf123", "share link"),
+        ("https://redd.it/r/testsub", "not a post"),
+        ("https://redd.it/user/someone/", "not a post"),
+        ("https://redd.it/comments/", "not a post"),
+        ("https://redd.it/tb/abc123", "not a post"),
+        ("https://redd.it/link/abc123", "not a post"),
+        ("https://redd.it/s/abc", "not a post"),
+        ("https://redd.it//r/testsub/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com//r/testsub/s/AbCdEf123", "share link"),
+        ("https://www.reddit.com/r/testsub//s/AbCdEf123/", "share link"),
+        ("https://redd.it//s/abc", "not a post"),
         ("not an id!", "valid post id"),
     ],
 )
@@ -70,6 +101,7 @@ def test_parse_post_ref_errors(raw, fragment):
         ("def456", "def456"),
         ("t1_DEF456", "def456"),
         ("https://www.reddit.com/r/testsub/comments/abc123/slug/def456/", "def456"),
+        ("https://www.reddit.com/comments/abc123//def456/", "def456"),
     ],
 )
 def test_parse_comment_id(raw, expected):
@@ -170,6 +202,59 @@ def test_discussion_target():
     assert parse_discussion_target("https://www.reddit.com/r/x1/wiki/").url == "https://www.reddit.com/r/x1/wiki/"
     with pytest.raises(InputError, match="post_or_url is empty"):
         parse_discussion_target(" ")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://www.reddit.com/r/testsub/s/AbCdEf123",
+        "https://www.reddit.com/u/someone/s/AbCdEf123",
+        "https://www.reddit.com/user/someone/s/AbCdEf123",
+        "www.reddit.com/R/testsub/s/AbCdEf123/",
+        "https://www.reddit.com/U/someone/s/AbCdEf123",
+        "https://www.reddit.com/USER/someone/S/AbCdEf123",
+        "https://redd.it/r/testsub/s/AbCdEf123",
+        "https://redd.it//r/testsub/s/AbCdEf123",
+        "https://www.reddit.com/u//someone/s/AbCdEf123",
+    ],
+)
+def test_discussion_target_share_link(raw):
+    # A share link cannot be resolved through the API, so looking it up as an article URL
+    # could not find the discussion behind it.
+    with pytest.raises(InputError, match="share link"):
+        parse_discussion_target(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://www.reddit.com/r/testsub/s/",  # no code
+        "https://www.reddit.com/user/s/submitted/",  # a user named "s"
+        "https://www.reddit.com/r/testsub/wiki/s/abc",
+        "https://www.reddit.com/r/testsub/wiki/u/someone/s/abc",  # looks like one, deeper in the path
+        "https://www.reddit.com/r/testsub//wiki//s/abc",  # doubled slashes do not hide the wiki
+    ],
+)
+def test_discussion_target_near_share_link_is_a_url(raw):
+    assert parse_discussion_target(raw).url == raw
+
+
+def test_discussion_target_reddit_style_redd_it_link_is_its_post():
+    assert parse_discussion_target("https://redd.it/r/testsub/comments/abc123/slug/").post == PostRef("abc123")
+
+
+def test_discussion_target_keeps_the_comment_of_an_empty_slug_permalink():
+    target = parse_discussion_target("https://www.reddit.com/comments/abc123//def456/")
+    assert target.post == PostRef("abc123", "def456")
+
+
+def test_comment_id_from_reddit_style_redd_it_permalink():
+    assert parse_comment_id("https://redd.it/r/testsub/comments/abc123/slug/def456/") == "def456"
+
+
+def test_comment_id_share_link():
+    with pytest.raises(InputError, match="share link"):
+        parse_comment_id("https://www.reddit.com/r/testsub/s/AbCdEf123")
 
 
 def test_url_variants():

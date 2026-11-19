@@ -259,15 +259,25 @@ graphics and tipping. What works:
 Any other combination (for example a client id without a secret) is a configuration error.
 The server still starts, logs the problem to stderr, and every tool call returns the message.
 
-To create credentials, sign in at <https://www.reddit.com/prefs/apps>, choose "create another
-app", pick the "script" type, and use the string under the app name as `REDDIT_CLIENT_ID` and
-the "secret" as `REDDIT_CLIENT_SECRET`.
+**Reddit is closing its public Data API.** Reddit
+[announced](https://www.reddit.com/r/redditdev/comments/1wubcvf/) on 2026-09-30 that it stopped
+accepting new requests for public API access on October 31, 2026. From January 12, 2027 it starts
+removing access for apps and users that have not registered or responded to its outreach, and it
+closes all remaining public access in March 2027. Both modes above use that API. Anonymous mode
+still works (checked 2026-11-16), but expect both modes to stop working on those dates unless
+Reddit changes its plans. What keeps this server working is tracked in
+[#11](https://github.com/jordanallenlewis/reddit-research-mcp/issues/11).
+
+As Reddit no longer accepts new requests for API access, you may not be able to get new
+credentials. If you already have a Reddit app, sign in at <https://www.reddit.com/prefs/apps> and
+use the string under the app name as `REDDIT_CLIENT_ID` and the "secret" as
+`REDDIT_CLIENT_SECRET`.
 
 Anonymous mode shares one public client id, and therefore one rate-limit quota, with every other
 installation of this server (and of anything else using that id) worldwide. Anyone installing this
-for a team should create their own app and set `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`.
-Reddit's Data API terms apply to your use of Reddit data through this server; read them before
-you rely on it.
+for a team that already has a Reddit app should set its `REDDIT_CLIENT_ID` and
+`REDDIT_CLIENT_SECRET`. Reddit's Data API terms apply to your use of Reddit data through this
+server; read them before you rely on it.
 
 Other settings:
 

@@ -370,6 +370,8 @@ class RedditClient:
         self._remaining: float | None = None
         self._reset_at = 0.0
         self._used: int | None = None
+        self._holds = 0  # cool-downs started so far; a call that waited clears only its own window
+        self._hold_until = 0.0  # latest end of a wait Reddit announced with a 429 (any call)
         self._morechildren_lock: asyncio.Lock | None = None
         self.timeout = REQUEST_TIMEOUT
         self.retry_timeout = RETRY_TIMEOUT
@@ -414,31 +416,55 @@ class RedditClient:
         if used is not None:
             self._used = int(used)
 
-    async def _gate(self, max_wait: float = MAX_RETRY_WAIT) -> float:
+    async def _gate(
+        self, max_wait: float = MAX_RETRY_WAIT, served: float = 0.0, waive_window: bool = False
+    ) -> float:
         """Spend one request from the window; wait up to max_wait s or fail fast when it is empty.
 
         Returns the seconds slept. There is no await between reading and updating the
         counters except the sleep, so concurrent tool calls cannot interleave mid-update.
+        A window or cool-down that changed during the sleep is checked again, with the
+        wait budget left, before anything is sent. A 429 cool-down (_hold_until) holds
+        whatever window headers other responses brought meanwhile; served is the end of
+        a cool-down the caller has already slept through, so it is not waited for again.
+        waive_window lets the one retry Reddit asked for (after this call's own 429 wait) pass
+        a used-up window without reopening it for other calls; it applies only if nothing
+        else holds the call when it arrives here, never after a sleep.
         """
-        if self._remaining is None:
-            return 0.0
-        now = self.clock()
-        if now >= self._reset_at:
-            self._remaining = None
-            return 0.0
-        if self._remaining < 1:
-            wait = self._reset_at - now
-            if wait <= max_wait:
-                await self.sleep(wait)
+        slept = 0.0
+        while True:
+            now = self.clock()
+            hold = self._hold_until - now if self._hold_until > served else 0.0
+            if self._remaining is not None and now >= self._reset_at:
                 self._remaining = None
-                return wait
-            raise RateLimitedError(
-                wait,
-                "The request window is used up (Reddit allows about 100 requests per minute "
-                "per client; anonymous clients share a quota).",
-            )
-        self._remaining -= 1
-        return 0.0
+            empty = self._remaining is not None and self._remaining < 1
+            if waive_window and empty and hold <= 0:
+                return slept  # the window stays used up for every other call
+            waive_window = False
+            if hold <= 0 and not empty:
+                if self._remaining is not None:
+                    self._remaining -= 1
+                return slept
+            wait = max(hold, self._reset_at - now if empty else 0.0)
+            if wait > max_wait - slept:
+                if hold >= wait:
+                    raise RateLimitedError(
+                        wait,
+                        "Reddit asked this client to wait (HTTP 429); requests are held until "
+                        "then.",
+                    )
+                raise RateLimitedError(
+                    wait,
+                    "The request window is used up (Reddit allows about 100 requests per minute "
+                    "per client; anonymous clients share a quota).",
+                )
+            window, held, hold_end = self._reset_at, self._holds, self._hold_until
+            await self.sleep(wait)
+            slept += wait
+            served = max(served, hold_end)  # slept through the cool-down known before the sleep
+            if empty and self._reset_at == window and self._holds == held:  # no 429 or new window meanwhile
+                self._remaining = None
+                return slept
 
     # -- transport
 
@@ -528,8 +554,10 @@ class RedditClient:
         form = None if data is None else {k: str(v) for k, v in data.items() if v is not None}
 
         slept = 0.0  # rate-limit waiting so far; all of it together stays within MAX_RETRY_WAIT
+        served = 0.0  # end of this call's own 429 wait, already slept through before its retry
+        waive = False  # this call's retry may pass a used-up window once (Reddit asked for it)
         for attempt in (0, 1):
-            slept += await self._gate(MAX_RETRY_WAIT - slept)
+            slept += await self._gate(MAX_RETRY_WAIT - slept, served, waive)
             started = self.clock()
             self.request_count += 1
             tally = CALL_TALLY.get()
@@ -570,7 +598,19 @@ class RedditClient:
                 raise self._auth_failure(exc) from exc
             except StatusCodeException as exc:
                 # Only the token endpoint raises this; API responses are inspected below.
-                raise self._auth_failure(exc) from exc
+                err = self._auth_failure(exc)
+                if isinstance(err, RateLimitedError):
+                    # Hold later requests for the wait we report, so the next call does not ask
+                    # the token endpoint again at once. An empty window that ends later still holds;
+                    # the end of a window with requests left is not a cool-down.
+                    until = self.clock() + err.retry_after
+                    if self._remaining is not None and self._remaining < 1:
+                        until = max(self._reset_at, until)
+                    self._remaining = 0.0
+                    self._reset_at = until
+                    self._holds += 1
+                    self._hold_until = max(self._hold_until, self.clock() + err.retry_after)
+                raise err from exc
             except Exception as exc:  # pragma: no cover - defensive
                 raise RedditAPIError(
                     f"Unexpected error calling Reddit for {verb} {path}: {describe_exception(exc)}"
@@ -588,11 +628,41 @@ class RedditClient:
             )
             if status == 429:
                 wait = _parse_retry_after(headers)
-                if attempt == 0 and wait <= MAX_RETRY_WAIT - slept:
-                    await self.sleep(max(wait, 0.5))
-                    slept += max(wait, 0.5)
-                    self._remaining = None  # waited as asked; let the retry through the gate
+                pause = max(wait, 0.5)  # never retry at once; the budget counts this minimum too
+                if attempt == 0 and pause <= MAX_RETRY_WAIT - slept:
+                    # Reddit asked this client, not just this call, to wait: hold other calls
+                    # at the gate for the same time. An empty window that ends later still holds;
+                    # the end of a window with requests left is not a cool-down. Another call's
+                    # cool-down still in force holds too, whatever this 429's window headers say.
+                    wait = pause
+                    until = self.clock() + wait
+                    if self._remaining is not None and self._remaining < 1:
+                        until = max(self._reset_at, until)
+                    earlier = self._hold_until  # another call's cool-down, if one is in force
+                    until = max(until, earlier)
+                    self._remaining = 0.0
+                    self._reset_at = until
+                    self._holds += 1
+                    served = self.clock() + wait
+                    self._hold_until = max(earlier, served)
+                    window, held = self._reset_at, self._holds
+                    await self.sleep(wait)
+                    slept += wait
+                    if (
+                        self._reset_at == window
+                        and self._holds == held  # no other call's 429 meanwhile
+                        and earlier <= self.clock()  # nor an earlier cool-down that outlasts this wait
+                    ):
+                        waive = True  # waited as asked; only this retry passes the used-up window
                     continue
+                # Giving up: hold every later request until Reddit's wait is over, even when the
+                # 429 carried no x-ratelimit headers, and for at least the minimum wait. Never
+                # shortens a longer window already known.
+                hold = min(pause, MAX_RESET_SECONDS)
+                self._remaining = 0.0
+                self._reset_at = max(self._reset_at, self.clock() + hold)
+                self._holds += 1
+                self._hold_until = max(self._hold_until, self.clock() + hold)
                 raise RateLimitedError(wait)
             if status == 401 and attempt == 0 and self._drop_token():
                 continue  # the token may have been revoked; fetch a fresh one once

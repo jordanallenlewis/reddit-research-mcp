@@ -14,7 +14,55 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- README "Authentication" gives the dates Reddit announced for closing its public Data API (no new
+  access requests after 2026-10-31, access removed from 2027-01-12 for apps that have not
+  registered, closed in March 2027) and says new app credentials may no longer be available.
 - The package and command are now `reddit-readonly-mcp`, so the name no longer clashes with an unrelated PyPI package. `reddit-research-mcp` still works as a command alias, and the User-Agent now starts with `reddit-readonly-mcp/`.
+
+### Fixed
+
+- After Reddit answered 429 with a long `Retry-After` (and no `x-ratelimit-*` headers), the next
+  tool calls still sent requests to Reddit, and a parallel call waking from a short wait could
+  clear a longer wait. The server now holds API requests until Reddit's wait is over and fails
+  those calls locally with the time left; a short wait is slept out before the next request.
+- When Reddit's token endpoint answered 429, the next tool call asked it for a token again at
+  once. The server now holds requests for the 60 s the error reports, and a parallel call waking
+  from a short 429 wait no longer clears a cool-down another call started meanwhile.
+- A call waiting a few seconds for a used-up request window to reset sent its request as soon as
+  it woke, even if a parallel call had started a 429 cool-down or seen a new used-up window in the
+  meantime. It now checks again: it waits on only if its total wait stays within 15 s, and
+  otherwise fails locally with the time left, without sending.
+- When Reddit answered 429 with a short `Retry-After` (up to 15 s), only the call that got it
+  waited before retrying; parallel calls kept sending to Reddit during that wait. Calls started
+  during the wait now wait until it is over, or fail locally with the time left when they can't
+  wait that long. A call waking from its own short wait also no longer clears another call's
+  longer 429 cool-down that was already in force when its 429 arrived: it waits that out too, or
+  fails locally with the time left, instead of retrying into it.
+- A response from a call that was already in flight could lift or shorten a 429 cool-down
+  another call had started: its `x-ratelimit-*` headers replaced the held window, so later
+  calls went out while Reddit had asked this client to wait. A cool-down now holds whatever
+  window headers arrive meanwhile, and a call held by one is told that Reddit asked this
+  client to wait, not that the request window is used up.
+- A redd.it link with a reddit.com-style path (`redd.it/r/<sub>/comments/<id>/...`,
+  `redd.it/comments/<id>`, `redd.it/r/<sub>/s/<code>`) was read as a post id made of its
+  first word (`r`, `comments`), so tools fetched an unrelated post. Links longer than
+  `redd.it/<id>` are now read like reddit.com links: the post id, the share-link error, or
+  "not a post" (an article lookup in `find_other_discussions`).
+- After waiting out its own `429`, a call's retry reopened a request window that was used up
+  (Reddit's `x-ratelimit-remaining: 0`, or the window's last request spent), so other calls went
+  out inside that window, some while the retry was still in flight. Only the retry Reddit asked for now passes the used-up
+  window, once; every other call still waits for the window to reset, or fails locally with
+  the time left.
+- A call that had already waited most of its 15 s rate-limit budget could still retry a 429:
+  the 0.5 s minimum wait before a retry was added after the budget check, so a retry could go
+  out at 15.3 s. The minimum wait now counts against the budget, and a retry that no longer
+  fits fails locally, like one with a long `Retry-After`. A 429 that is given up holds the next
+  calls for at least that minimum wait, even when Reddit's `Retry-After` is 0.
+- A share link with a doubled slash in its path (`redd.it//r/<sub>/s/<code>`,
+  `reddit.com/r/<sub>//s/<code>`) got "not a post", or in `find_other_discussions` was looked up
+  as an article. Doubled slashes in a share-link path are now read as one, so these links get
+  the share-link error too.
+- Share links in any letter case, including profile ones (`/u/<name>/s/<code>`, `/user/<name>/s/<code>`), now get the "share link" error that says to pass the `/comments/` URL, instead of "not a post" (in post and comment_id arguments). `find_other_discussions` gives the same error instead of looking the share link up as an article URL, which could not find the discussion behind it.
 
 ## [0.2.2] - 2026-10-08
 
