@@ -628,12 +628,13 @@ class RedditClient:
             )
             if status == 429:
                 wait = _parse_retry_after(headers)
-                if attempt == 0 and wait <= MAX_RETRY_WAIT - slept:
+                pause = max(wait, 0.5)  # never retry at once; the budget counts this minimum too
+                if attempt == 0 and pause <= MAX_RETRY_WAIT - slept:
                     # Reddit asked this client, not just this call, to wait: hold other calls
                     # at the gate for the same time. An empty window that ends later still holds;
                     # the end of a window with requests left is not a cool-down. Another call's
                     # cool-down still in force holds too, whatever this 429's window headers say.
-                    wait = max(wait, 0.5)
+                    wait = pause
                     until = self.clock() + wait
                     if self._remaining is not None and self._remaining < 1:
                         until = max(self._reset_at, until)
@@ -655,11 +656,13 @@ class RedditClient:
                         waive = True  # waited as asked; only this retry passes the used-up window
                     continue
                 # Giving up: hold every later request until Reddit's wait is over, even when the
-                # 429 carried no x-ratelimit headers. Never shortens a longer window already known.
+                # 429 carried no x-ratelimit headers, and for at least the minimum wait. Never
+                # shortens a longer window already known.
+                hold = min(pause, MAX_RESET_SECONDS)
                 self._remaining = 0.0
-                self._reset_at = max(self._reset_at, self.clock() + min(wait, MAX_RESET_SECONDS))
+                self._reset_at = max(self._reset_at, self.clock() + hold)
                 self._holds += 1
-                self._hold_until = max(self._hold_until, self.clock() + min(wait, MAX_RESET_SECONDS))
+                self._hold_until = max(self._hold_until, self.clock() + hold)
                 raise RateLimitedError(wait)
             if status == 401 and attempt == 0 and self._drop_token():
                 continue  # the token may have been revoked; fetch a fresh one once

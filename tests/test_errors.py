@@ -422,6 +422,52 @@ def test_both_gate_waits_count_against_the_429_retry_budget():
     assert fake.sleeps == [4.0, 2.0, 2.0]
 
 
+def _429_after_gate_wait(gate_wait: str) -> tuple[FakeReddit, list[float]]:
+    # The call first waits gate_wait s at the gate for a used-up window, then its request gets
+    # a 429 with "retry-after: 0", which the client rounds up to its 0.5 s minimum wait.
+    sent_at = []
+
+    def search(params):
+        sent_at.append(now[0])
+        return raw(429, b"", {"retry-after": "0"}) if len(sent_at) == 1 else ok(listing([]))
+
+    fake = FakeReddit({
+        ("GET", "/r/x0/hot"): ok(listing([]), headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": gate_wait}),
+        ("GET", "/search"): search,
+    })
+    now = _manual_clock(fake)
+    run(fake.get("/r/x0/hot"))
+    return fake, sent_at
+
+
+def test_429_minimum_wait_that_no_longer_fits_the_budget_fails_without_a_retry():
+    # 14.8 s at the gate + the 0.5 s minimum wait is over MAX_RETRY_WAIT (15 s): give up locally
+    # instead of sleeping past the budget and sending the retry at 15.3 s.
+    fake, sent_at = _429_after_gate_wait("14.8")
+    with pytest.raises(RateLimitedError):
+        run(fake.get("/search", q="x"))
+    assert sent_at == [pytest.approx(1014.8)]
+    assert fake.sleeps == [pytest.approx(14.8)]
+    assert sum(fake.sleeps) <= MAX_RETRY_WAIT
+
+
+def test_429_given_up_holds_the_next_call_for_the_minimum_wait():
+    # Even with "retry-after: 0", the call after a 429 that was given up is not sent at once.
+    fake, sent_at = _429_after_gate_wait("14.8")
+    with pytest.raises(RateLimitedError):
+        run(fake.get("/search", q="x"))
+    run(fake.get("/search", q="x"))
+    assert sent_at == [pytest.approx(1014.8), pytest.approx(1015.3)]
+
+
+def test_429_minimum_wait_that_exactly_fills_the_budget_still_retries():
+    # 14.5 s at the gate + the 0.5 s minimum wait is exactly MAX_RETRY_WAIT: the retry goes out.
+    fake, sent_at = _429_after_gate_wait("14.5")
+    assert run(fake.get("/search", q="x"))["kind"] == "Listing"
+    assert sent_at == [1014.5, 1015.0]
+    assert fake.sleeps == [14.5, 0.5]
+
+
 @pytest.mark.parametrize("new_reset, sent", [(4, [1014.0]), (10, [])])
 def test_gate_waits_for_a_new_used_up_window_only_within_the_budget_left(new_reset, sent):
     # A waits 10 s at the gate. Meanwhile B's request (sent as the old window ends) shows a new,
