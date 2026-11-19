@@ -53,6 +53,11 @@ All notable changes to this project are documented here. The format follows
   out inside that window, some while the retry was still in flight. Only the retry Reddit asked for now passes the used-up
   window, once; every other call still waits for the window to reset, or fails locally with
   the time left.
+- A call that had already waited most of its 15 s rate-limit budget could still retry a 429:
+  the 0.5 s minimum wait before a retry was added after the budget check, so a retry could go
+  out at 15.3 s. The minimum wait now counts against the budget, and a retry that no longer
+  fits fails locally, like one with a long `Retry-After`. A 429 that is given up holds the next
+  calls for at least that minimum wait, even when Reddit's `Retry-After` is 0.
 - A share link with a doubled slash in its path (`redd.it//r/<sub>/s/<code>`,
   `reddit.com/r/<sub>//s/<code>`) got "not a post", or in `find_other_discussions` was looked up
   as an article. Doubled slashes in a share-link path are now read as one, so these links get
