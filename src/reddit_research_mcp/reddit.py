@@ -426,9 +426,10 @@ class RedditClient:
         A window or cool-down that changed during the sleep is checked again, with the
         wait budget left, before anything is sent. A 429 cool-down (_hold_until) holds
         whatever window headers other responses brought meanwhile; served is the end of
-        a cool-down the caller has already slept through, so it is not waited for again.
-        waive_window lets the one retry Reddit asked for (after this call's own 429 wait) pass
-        a used-up window without reopening it for other calls; it applies only if nothing
+        a cool-down the caller has already slept through, so it is not waited for again, nor
+        a used-up window that ends by then. waive_window lets the one retry Reddit asked for
+        (after this call's own 429 wait) pass a used-up window without reopening it for other
+        calls; it applies only if nothing
         else holds the call when it arrives here, never after a sleep.
         """
         slept = 0.0
@@ -438,8 +439,11 @@ class RedditClient:
             if self._remaining is not None and now >= self._reset_at:
                 self._remaining = None
             empty = self._remaining is not None and self._remaining < 1
-            if waive_window and empty and hold <= 0:
-                return slept  # the window stays used up for every other call
+            if empty and hold <= 0 and (waive_window or self._reset_at <= served):
+                # Reddit asked this call to retry, or the window ends no later than a cool-down this
+                # call has already slept through (a timer may wake a hair early). The window stays
+                # used up for every other call.
+                return slept
             waive_window = False
             if hold <= 0 and not empty:
                 if self._remaining is not None:
