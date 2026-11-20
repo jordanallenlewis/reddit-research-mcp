@@ -1038,6 +1038,69 @@ def test_call_that_waits_out_a_cool_down_with_its_whole_budget_is_sent_after_an_
     assert len(fake.calls) == 2 and fake.sleeps == [15.0]
 
 
+def test_whole_budget_429_retry_is_sent_after_an_early_wake_when_another_calls_shorter_429_came_meanwhile():
+    # B's request is in flight from 1000 to 1003. A gets "retry after 15" at 1000 (its whole
+    # budget), so calls are held to 1015. B's answer is "retry after 2": shorter, so A's hold and
+    # window end stay at 1015. A's sleep ends a microsecond early. A has served the wait that
+    # ends the window, so its retry is sent rather than failing over that microsecond, and the
+    # window stays used up for other calls until it ends.
+    vt = None
+    sent: list[tuple[str, float, float | None]] = []
+    fake = FakeReddit({
+        ("GET", "/search"): [raw(429, b"", {"retry-after": "15"}), ok(listing([]))],
+        ("GET", "/r/x1/hot"): [raw(429, b"", {"retry-after": "2"}), ok(listing([]))],
+    })
+    send = fake._send_raw
+    first_b = []
+
+    async def in_flight(verb, path, params, data, timeout=None):
+        sent.append((path, vt.now, fake._remaining))
+        if path == "/r/x1/hot" and not first_b:
+            first_b.append(True)
+            await vt.wait(3)
+        return await send(verb, path, params, data, timeout)
+
+    fake._send_raw = in_flight
+    vt = _VirtualTime(fake)
+
+    async def sleep(seconds: float) -> None:
+        fake.sleeps.append(seconds)
+        await vt.wait(seconds - 1e-6 if seconds == MAX_RETRY_WAIT else seconds)  # only A's wait wakes early
+
+    fake.sleep = sleep
+    b, a = vt.run(fake.get("/r/x1/hot"), fake.get("/search", q="x"))
+    assert a["kind"] == "Listing" and b["kind"] == "Listing"
+    assert sent[:2] == [("/r/x1/hot", 1000.0, None), ("/search", 1000.0, None)]
+    assert sent[2] == ("/search", 1015.0 - 1e-6, 0.0)  # A's retry; the window is still used up
+    assert sent[3] == ("/r/x1/hot", 1015.0, None)  # B is sent once the window has ended
+    assert len(sent) == 4
+
+
+def test_429_retry_still_waits_for_a_used_up_window_that_ends_after_its_own_wait():
+    # A gets "retry after 2" at 1000. D's request, in flight since 1000, answers at 1001 with a
+    # 200 saying the window is used up until 1004. A has served only its own wait (to 1002), so
+    # its retry waits for the window and is sent at 1004, not at 1002.
+    vt = None
+    sent: list[tuple[str, float]] = []
+    fake = FakeReddit({
+        ("GET", "/search"): [raw(429, b"", {"retry-after": "2"}), ok(listing([]))],
+        ("GET", "/r/x1/hot"): ok(listing([]), headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "3"}),
+    })
+    send = fake._send_raw
+
+    async def in_flight(verb, path, params, data, timeout=None):
+        sent.append((path, vt.now))
+        if path == "/r/x1/hot":
+            await vt.wait(1)
+        return await send(verb, path, params, data, timeout)
+
+    fake._send_raw = in_flight
+    vt = _VirtualTime(fake)
+    d, a = vt.run(fake.get("/r/x1/hot"), fake.get("/search", q="x"))
+    assert d["kind"] == "Listing" and a["kind"] == "Listing"
+    assert sent == [("/r/x1/hot", 1000.0), ("/search", 1000.0), ("/search", 1004.0)]
+
+
 def test_short_429_on_the_windows_last_request_still_retries_once():
     # The call spends the window's last request (1 left, resets in 50 s) and gets "retry after 3".
     # Its own spend is not another call's cool-down: it waits 3 s and retries, as before.

@@ -58,6 +58,10 @@ All notable changes to this project are documented here. The format follows
   out at 15.3 s. The minimum wait now counts against the budget, and a retry that no longer
   fits fails locally, like one with a long `Retry-After`. A 429 that is given up holds the next
   calls for at least that minimum wait, even when Reddit's `Retry-After` is 0.
+- A call whose 429 asked for its whole 15 s budget could fail with "the request window is used
+  up" when another call's shorter 429 arrived during its wait and its timer woke slightly early
+  (event-loop timers may wake up to a few milliseconds early). A call that has waited out a cool-down now also passes a used-up window that ends by
+  then; the window stays used up for other calls.
 - A share link with a doubled slash in its path (`redd.it//r/<sub>/s/<code>`,
   `reddit.com/r/<sub>//s/<code>`) got "not a post", or in `find_other_discussions` was looked up
   as an article. Doubled slashes in a share-link path are now read as one, so these links get
