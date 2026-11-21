@@ -54,6 +54,9 @@ def _clip(raw: str | None, arg: str, limit: int = MAX_INPUT_CHARS) -> str:
     return s
 
 
+_PERMALINK_PATH = re.compile(r"/?r/[^/\s?#]+/comments/[0-9a-z]", re.I)
+
+
 def _looks_like_url(s: str) -> bool:
     if s.startswith("//") or _SCHEME.match(s):
         return True
@@ -228,6 +231,9 @@ def parse_post_ref(raw: str | None, *, arg: str = "post") -> PostRef:
         raise InputError(f"{arg} is empty; pass a post id such as 1abc234 or a post URL")
     if _looks_like_url(s):
         return _post_from_url(s, raw or "", arg)
+    if _PERMALINK_PATH.match(s):
+        # The "permalink" field of Reddit's JSON is path-only: read it as a reddit.com URL.
+        return _post_from_url("https://www.reddit.com/" + s.lstrip("/"), raw or "", arg)
     low = s.lower()
     if low.startswith("t1_"):
         raise InputError(
