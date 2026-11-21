@@ -781,10 +781,12 @@ async def search_subreddits(
         seen = {str((c.get("data") or {}).get("display_name", "")).lower() for c in desc_children}
         extra = [x for x in name_list if x.lower() not in seen][:n]
         name_children: list = []
+        checked = False
         if extra:
             try:
                 info = await client.get("/api/info", sr_name=",".join(extra))
                 name_children, _ = _listing_children(info)
+                checked = True
             except Exception as exc:
                 problems.append(f"details for name matches unavailable: {describe_exception(exc)}")
                 if not allow:  # name lookups include 18+ communities; never show unchecked names
@@ -792,9 +794,13 @@ async def search_subreddits(
                     extra = []
         desc_children, hidden_desc = _drop_nsfw(desc_children, allow)
         name_children, hidden_names = _drop_nsfw(name_children, allow)
-        if hidden_names:
+        if hidden_names or (checked and not allow):
             shown = {str((c.get("data") or {}).get("display_name", "")).lower() for c in name_children}
+            before = len(extra)
             extra = [x for x in extra if x.lower() in shown]
+            unchecked = before - len(extra) - hidden_names
+            if checked and not allow and unchecked > 0:
+                problems.append(f"{unchecked} name matches not shown because their NSFW status is unknown")
         nsfw = _nsfw_note(hidden_desc + hidden_names, what="community")
         out = [f'subreddits for "{q}"' + _notes(n_note, nsfw)]
         if desc_children:
