@@ -53,6 +53,11 @@ from reddit_research_mcp.refs import (
         ("https://www.reddit.com/comments/abc123//def456/", PostRef("abc123", "def456")),
         ("https://www.reddit.com/r/testsub/comments/abc123//def456/?context=3", PostRef("abc123", "def456")),
         ("https://redd.it/r/testsub/comments/abc123//def456", PostRef("abc123", "def456")),
+        # Path-only permalinks, the form Reddit's JSON "permalink" field returns.
+        ("/r/testsub/comments/abc123/some_slug/", PostRef("abc123")),
+        ("r/testsub/comments/abc123/some_slug/def456", PostRef("abc123", "def456")),
+        ("/r/TestSub/comments/ABC123/", PostRef("abc123")),
+        ("/r/testsub/comments/abc123/some_slug/def456/?context=3", PostRef("abc123", "def456")),
     ],
 )
 def test_parse_post_ref(raw, expected):
@@ -86,6 +91,10 @@ def test_parse_post_ref(raw, expected):
         ("https://www.reddit.com/r/testsub//s/AbCdEf123/", "share link"),
         ("https://redd.it//s/abc", "not a post"),
         ("not an id!", "valid post id"),
+        ("/r/testsub/wiki/comments/abc123", "valid post id"),
+        ("/r/testsub/s/AbCdEf123", "valid post id"),
+        ("/u/someone/comments/abc123", "valid post id"),
+        ("/r/testsub/comments/", "valid post id"),
     ],
 )
 def test_parse_post_ref_errors(raw, fragment):
