@@ -639,8 +639,11 @@ class CommentRenderer:
         return True
 
     def _add_cut_first(self, d: Mapping[str, Any], depth: int) -> bool:
-        """Nothing fits yet: cut the first comment's body so the tree is not empty."""
-        if self.parts:
+        """Nothing fits yet: cut the first comment's body so the tree is not empty.
+
+        Group labels and stub lines may already be in ``parts``; only a rendered comment counts.
+        """
+        if self.stats.shown:
             return False
         self.stopped = False
         overhead = len(comment_block(d, depth, focus=self.focus, body_limit=0)) + 1

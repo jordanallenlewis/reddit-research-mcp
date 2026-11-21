@@ -510,3 +510,18 @@ def test_budget_line_counts_threads_and_comments():
 
 def test_no_tilde_when_there_are_no_stubs():
     assert server._stub_summary("abc123", fmt.CommentStats(shown=2)) == "0 more in 0 stubs"
+
+
+def test_expand_comments_cuts_an_oversize_first_comment_instead_of_showing_none():
+    big = comment("e1", "word " * 1800)["data"]  # about 9,000 characters
+
+    def things(params):
+        return ok({"json": {"errors": [], "data": {"things": [{"kind": "t1", "data": big}]}}})
+
+    fake = FakeReddit({("GET", "/api/morechildren"): things, ("GET", "/api/info"): sfw_info})
+    server.set_client(fake)
+    out = run(server.expand_comments(post="abc123", comment_ids=["e1"], max_chars=5000))
+    assert "-- top-level comments --" in out
+    assert "[e1]" in out and "chars]" in out
+    assert "Shown 1 comment" in out
+    assert len(out) <= 5000
