@@ -445,3 +445,13 @@ def test_control_characters_ansi_and_lone_surrogates_are_removed():
 def test_truncation_counts_code_points_so_it_never_splits_an_astral_character():
     cut = fmt.truncate("\U0001f600" * 50, 21)
     assert cut.startswith("\U0001f600" * 21 + " [+29 chars]") and cut.encode("utf-8")
+
+
+def test_long_first_comment_is_cut_not_dropped():
+    r = fmt.CommentRenderer(max_chars=300)
+    r.walk([comment("a", "word " * 100), comment("b", "short"), comment("c", "short")])
+    assert r.stats.shown >= 1
+    assert r.text.startswith("[a]")
+    assert "chars]" in r.text
+    assert len(r.text) <= 300
+    assert "a" not in r.stats.unshown_ids
