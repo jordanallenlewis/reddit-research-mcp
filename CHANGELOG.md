@@ -21,6 +21,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `get_post` and `expand_comments` accept path-only permalinks (`/r/<sub>/comments/<id>/<slug>/`), the form Reddit's JSON `permalink` field returns.
 - After Reddit answered 429 with a long `Retry-After` (and no `x-ratelimit-*` headers), the next
   tool calls still sent requests to Reddit, and a parallel call waking from a short wait could
   clear a longer wait. The server now holds API requests until Reddit's wait is over and fails
