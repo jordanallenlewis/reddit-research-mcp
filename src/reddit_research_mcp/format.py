@@ -584,7 +584,9 @@ def comment_head(d: Mapping[str, Any], *, focus: str | None = None) -> str:
     return " ".join(parts)
 
 
-def comment_block(d: Mapping[str, Any], depth: int, *, focus: str | None = None) -> str:
+def comment_block(
+    d: Mapping[str, Any], depth: int, *, focus: str | None = None, body_limit: int | None = None
+) -> str:
     pad = "  " * depth
     head = pad + comment_head(d, focus=focus)
     body = str(d.get("body") or "").strip()
@@ -593,6 +595,8 @@ def comment_block(d: Mapping[str, Any], depth: int, *, focus: str | None = None)
     text = clean_text(body, keep_blank_lines=False)
     if not text:
         return head
+    if body_limit is not None:
+        text = truncate(text, body_limit)
     return head + "\n" + indent(text, pad + "  ")
 
 
@@ -633,6 +637,18 @@ class CommentRenderer:
         self.parts.append(block)
         self.size += len(block) + 1
         return True
+
+    def _add_cut_first(self, d: Mapping[str, Any], depth: int) -> bool:
+        """Nothing fits yet: cut the first comment's body so the tree is not empty."""
+        if self.parts:
+            return False
+        self.stopped = False
+        overhead = len(comment_block(d, depth, focus=self.focus, body_limit=0)) + 1
+        limit = self.max_chars - overhead - 24  # room for the [+N chars] marker
+        if limit < 40:
+            self.stopped = True
+            return False
+        return self.add(comment_block(d, depth, focus=self.focus, body_limit=limit))
 
     def _count_hidden(self, children: Iterable[Mapping[str, Any]]) -> None:
         for t in _iter_tree(children):
@@ -679,7 +695,7 @@ class CommentRenderer:
             self.add("  " * depth + f"({flatten(kind) or 'unknown'} item not rendered)")
             return
         replies = children_of(d)
-        if self.stopped or not self.add(comment_block(d, depth, focus=self.focus)):
+        if self.stopped or not (self.add(comment_block(d, depth, focus=self.focus)) or self._add_cut_first(d, depth)):
             self.stats.unshown_ids.append(flatten(d.get("id")))
             self.stats.unshown_comments += 1 + count_loaded(replies)
             self._count_hidden(replies)
