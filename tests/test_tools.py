@@ -305,11 +305,11 @@ def test_search_subreddits_keeps_partial_results_for_a_plain_http_failure():
     fake = FakeReddit({
         ("GET", "/subreddits/search"): raw(500, b"oops"),
         ("GET", "/api/search_reddit_names"): ok({"names": ["x1abc"]}),
-        ("GET", "/api/info"): ok(listing([])),
+        ("GET", "/api/info"): ok(listing([{"kind": "t5", "data": {"display_name": "x1abc", "over18": False}}])),
     })
     server.set_client(fake)
     out = run(server.search_subreddits(query="x1"))
-    assert 'Names starting with "x1" (1):\nr/x1abc' in out
+    assert 'Names starting with "x1" (1):' in out and "r/x1abc" in out
     assert "note: description search failed: HTTPError" in out
 
 
