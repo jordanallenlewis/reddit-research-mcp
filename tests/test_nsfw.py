@@ -173,3 +173,33 @@ def test_tools_default_include_nsfw_false():
         fn = getattr(fn, "fn", fn)
         sig = inspect.signature(inspect.unwrap(fn))
         assert sig.parameters["include_nsfw"].default is False, name
+
+
+def _names_fake(names, info_children):
+    return FakeReddit({
+        ("GET", "/subreddits/search"): ok(listing([])),
+        ("GET", "/api/search_reddit_names"): ok({"names": names}),
+        ("GET", "/api/info"): ok(listing(info_children)),
+    })
+
+
+def test_search_subreddits_hides_names_that_info_leaves_out():
+    server.set_client(_names_fake(["maybe1"], []))
+    out = run(server.search_subreddits(query="topic"))
+    assert "r/maybe1" not in out and "NSFW status is unknown" in out
+    assert "Names starting with" not in out
+
+
+def test_search_subreddits_count_matches_names_listed_on_partial_omission():
+    safe = {"kind": "t5", "data": {"display_name": "safe2", "over18": False}}
+    server.set_client(_names_fake(["safe2", "gone2"], [safe]))
+    out = run(server.search_subreddits(query="topic"))
+    assert 'Names starting with "topic" (1):' in out
+    assert "r/safe2" in out and "gone2" not in out and "1 name matches not shown" in out
+
+
+def test_search_subreddits_nsfw_allowed_keeps_unchecked_names():
+    server.set_client(_names_fake(["maybe1"], []))
+    out = run(server.search_subreddits(query="topic", include_nsfw=True))
+    assert 'Names starting with "topic" (1):' in out and "r/maybe1" in out
+    assert "unknown" not in out
