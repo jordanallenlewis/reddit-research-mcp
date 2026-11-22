@@ -830,3 +830,11 @@ def test_request_count_in_footer_is_per_call_when_calls_overlap():
     assert "\n[1 Reddit request," in small
     assert "\n[3 Reddit requests," in big
     assert fake.request_count == 4  # the client's own total is unchanged
+
+
+def test_get_posts_tail_id_lists_stay_inside_the_budget():
+    posts = [t3(id=f"q{i:04d}", selftext="z" * 3000) for i in range(150)]
+    server.set_client(FakeReddit({("GET", "/api/info"): ok(listing(posts))}))
+    out = run(server.get_posts(posts=[f"q{i:04d}" for i in range(150)], max_chars=2000))
+    assert len(out) <= 2000
+    assert "Output budget reached; not shown (149)" in out and "more ids not listed" in out

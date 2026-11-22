@@ -206,6 +206,12 @@ MIN_STUB_IDS = 10  # ids a stub line always lists, however small the budget
 FOOTER_RESERVE = 600  # coverage and budget lines, without their id lists
 
 
+def _listed(ids: list[str], cap: int) -> str:
+    """Ids joined with ", ", at most cap of them, then a count of the rest."""
+    s = ", ".join(ids[:cap])
+    return s + f" (+{len(ids) - cap} more ids not listed)" if len(ids) > cap else s
+
+
 def _id_cap(budget: int, most: int) -> int:
     """How many ids (about 8 chars each) a footer line may list for this budget."""
     return min(most, max(MIN_STUB_IDS, budget // 40))
@@ -1396,6 +1402,7 @@ async def get_posts(
         if blocks:
             out.append("\n\n".join(blocks))
         tail = []
+        id_cap = _id_cap(budget, 300)  # id lists in the tail must fit the 600 chars kept free for it
         cut = [b.split("]", 1)[0].lstrip("[") for b in blocks if re.search(r" \[\+[\d,]+ chars\]", b)]
         if budget_cut:
             pid, need, capped = budget_cut
@@ -1409,12 +1416,12 @@ async def get_posts(
                 "returns the whole text"
             )
         if missing:
-            tail.append(f"Not found (deleted, private or wrong id): {', '.join(missing)}")
+            tail.append(f"Not found (deleted, private or wrong id): {_listed(missing, id_cap)}")
         if nsfw_ids:
-            tail.append(f"NSFW, hidden ({len(nsfw_ids)}; {_nsfw_hint()}): {', '.join(nsfw_ids)}")
+            tail.append(f"NSFW, hidden ({len(nsfw_ids)}; {_nsfw_hint()}): {_listed(nsfw_ids, id_cap)}")
         if unshown:
             tail.append(
-                f"Output budget reached; not shown ({len(unshown)}): get_posts(posts=[{', '.join(unshown)}])"
+                f"Output budget reached; not shown ({len(unshown)}): get_posts(posts=[{_listed(unshown, id_cap)}])"
             )
         if over_cap:
             tail.append(
@@ -1424,7 +1431,7 @@ async def get_posts(
         if unfetched:
             tail.append(
                 f"Stopped after {MULTI_REQUEST_SECONDS:.0f} s; not fetched ({len(unfetched)}): "
-                f"get_posts(posts=[{', '.join(unfetched)}])"
+                f"get_posts(posts=[{_listed(unfetched, id_cap)}])"
             )
         if skipped:
             shown = ", ".join(repr(clip(fmt.flatten(x), 40)) for x in skipped[:10])
