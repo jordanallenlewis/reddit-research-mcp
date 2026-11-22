@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 
 import pytest
@@ -372,6 +373,64 @@ def test_get_posts_cut_body_hint():
     assert "[+" in out and 'get_posts(posts=[long1], body_chars=40000) returns the whole text' in out
     out = run(server.get_posts(posts=["long1"], body_chars=40000))
     assert "returns the whole text" not in out
+
+
+def test_get_posts_cuts_an_oversize_first_post_to_the_budget():
+    body = "word " * 8000  # 40,000 characters
+    fake = FakeReddit({("GET", "/api/info"): ok(listing([t3(id="q0", selftext=body)]))})
+    server.set_client(fake)
+    out = run(server.get_posts(posts=["q0"], body_chars=40000, max_chars=2000))
+    assert len(out) <= 2000
+    assert out.startswith("1 of 1 posts")
+    assert "[q0]" in out and "body:\nword word" in out
+    assert re.search(r" \[\+[\d,]+ chars\]", out)
+    assert "Output budget reached" not in out
+    hint = re.search(r"get_posts\(posts=\[q0\], body_chars=40000, max_chars=(\d+)\) returns the whole text", out)
+    assert hint
+    # the suggested budget really shows the whole post
+    whole = run(server.get_posts(posts=["q0"], body_chars=40000, max_chars=int(hint.group(1))))
+    assert not re.search(r" \[\+[\d,]+ chars\]", whole) and "returns the whole text" not in whole
+    assert whole.rstrip().endswith("word")
+
+
+def test_get_posts_budget_cut_at_default_body_chars_also_names_max_chars():
+    fake = FakeReddit({("GET", "/api/info"): ok(listing([t3(id="q0", selftext="word " * 8000)]))})
+    server.set_client(fake)
+    out = run(server.get_posts(posts=["q0"], max_chars=2000))  # body_chars defaults to 4000
+    assert len(out) <= 2000 and re.search(r" \[\+[\d,]+ chars\]", out)
+    assert re.search(r"get_posts\(posts=\[q0\], body_chars=40000, max_chars=\d+\) returns the whole text", out)
+
+
+def test_get_posts_first_post_with_a_huge_header_is_shown_and_names_a_budget_that_fits():
+    posts = [t3(id="q0", selftext="word " * 200, title="T" * 1500), t3(id="q1", selftext="tiny")]
+    fake = FakeReddit({("GET", "/api/info"): ok(listing(posts))})
+    server.set_client(fake)
+    out = run(server.get_posts(posts=["q0", "q1"], max_chars=2000))
+    assert out.startswith("1 of 2 posts") and "[q0]" in out and re.search(r"body:\n\[\d+ chars\]", out)
+    assert "not shown (1): get_posts(posts=[q1])" in out
+    need = int(re.search(r"get_posts\(posts=\[q0\], body_chars=40000, max_chars=(\d+)\)", out).group(1))
+    whole = run(server.get_posts(posts=["q0"], body_chars=40000, max_chars=need))
+    assert whole.startswith("1 of 1 posts") and "was cut to fit" not in whole
+    assert whole.rstrip().endswith("word")
+
+
+def test_get_posts_budget_cut_of_a_body_over_40000_does_not_promise_the_whole_text():
+    fake = FakeReddit({("GET", "/api/info"): ok(listing([t3(id="q0", selftext="word " * 20000)]))})
+    server.set_client(fake)
+    out = run(server.get_posts(posts=["q0"], body_chars=40000, max_chars=2000))
+    assert len(out) <= 2000 and "returns the whole text" not in out
+    assert re.search(r"max_chars=\d+\) returns the first 40000 characters of the body", out)
+
+
+def test_get_posts_oversize_later_post_is_still_listed_not_cut():
+    posts = [t3(id="q0", selftext="short body"), t3(id="q1", selftext="word " * 8000)]
+    fake = FakeReddit({("GET", "/api/info"): ok(listing(posts))})
+    server.set_client(fake)
+    out = run(server.get_posts(posts=["q0", "q1"], body_chars=40000, max_chars=2000))
+    assert len(out) <= 2000
+    assert out.startswith("1 of 2 posts") and "[q0]" in out
+    assert "Output budget reached; not shown (1): get_posts(posts=[q1])" in out
+    assert "max_chars=" not in out
 
 
 def test_private_subreddit_info_falls_back_to_listing_data():
