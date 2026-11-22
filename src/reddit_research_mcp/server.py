@@ -1365,6 +1365,7 @@ async def get_posts(
         blocks: list[str] = []
         size = 0
         unshown: list[str] = []
+        budget_cut: tuple[str, int, bool] | None = None  # (id, max_chars to show it, body over 40,000)
         for pid in ids:
             d = found.get(pid)
             if d is None:
@@ -1376,9 +1377,18 @@ async def get_posts(
                 block = fmt.post_detail(d, body)
             except Exception as exc:
                 block = f"[{pid}] (could not render this post: {type(exc).__name__})"
-            if blocks and size + len(block) + 2 > budget - 600:
-                unshown.append(pid)
-                continue
+            if size + len(block) + 2 > budget - 600:
+                if blocks:
+                    unshown.append(pid)
+                    continue
+                # Nothing shown yet: cut this post's body to fit rather than blow past the budget.
+                # A header too big to leave room for any body keeps only the "[N chars]" stub.
+                limit = min(body, budget - 600 - 2 - len(fmt.post_detail(d, 0)) - 24)  # 24: [+N chars]
+                block = fmt.post_detail(d, limit if limit >= 40 else 0)
+                full = fmt.post_detail(d, 40_000)
+                need = min(200_000, -(-(len(full) + 2 + 600) // 1000) * 1000)
+                capped = re.search(r" \[\+[\d,]+ chars\]$", full) is not None  # body over 40,000
+                budget_cut = (pid, need, capped)
             blocks.append(block)
             size += len(block) + 2
         missing = [x for x in ids if x not in found and x not in unfetched and x not in nsfw_ids]
@@ -1387,7 +1397,13 @@ async def get_posts(
             out.append("\n\n".join(blocks))
         tail = []
         cut = [b.split("]", 1)[0].lstrip("[") for b in blocks if re.search(r" \[\+[\d,]+ chars\]", b)]
-        if cut and body < 40_000:
+        if budget_cut:
+            pid, need, capped = budget_cut
+            tail.append(
+                f"[{pid}] was cut to fit max_chars: get_posts(posts=[{pid}], body_chars=40000, max_chars={need}) "
+                + ("returns the first 40000 characters of the body" if capped else "returns the whole text")
+            )
+        elif cut and body < 40_000:
             tail.append(
                 f"[+N chars] marks a cut body: get_posts(posts=[{', '.join(cut)}], body_chars=40000) "
                 "returns the whole text"
