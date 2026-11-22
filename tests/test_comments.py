@@ -525,3 +525,31 @@ def test_expand_comments_cuts_an_oversize_first_comment_instead_of_showing_none(
     assert "[e1]" in out and "chars]" in out
     assert "Shown 1 comment" in out
     assert len(out) <= 5000
+
+
+def _big_header_posts():
+    title = "T" * 300
+    caps = {"items": [{"caption": f"caption number {i} " + "c" * 60, "media_id": f"m{i}"} for i in range(10)]}
+    return {
+        "gallery": ({"title": title, "gallery_data": caps, "is_gallery": True, "is_self": False}, {}),
+        "clamped": ({"title": title}, {"comment_limit": 9999, "comment_depth": 99, "context": 99}),
+        "long_url": ({"title": "A link", "is_self": False, "url": "https://example.com/" + "u" * 1480}, {}),
+    }
+
+
+@pytest.mark.parametrize("shape", ["gallery", "clamped", "long_url"])
+@pytest.mark.parametrize("budget", [2000, 2500])
+def test_get_post_large_header_still_respects_max_chars(shape, budget):
+    post_kw, call_kw = _big_header_posts()[shape]
+    kids = [comment(f"k{i}", "word " * 80) for i in range(30)] + [more([f"x{i:04d}" for i in range(540)], 1552)]
+    fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids, selftext="Body " * 2000, **post_kw))})
+    server.set_client(fake)
+    out = run_raw(server.get_post(post="abc123", max_chars=budget, **call_kw))
+    assert len(out) <= budget
+
+
+def test_get_post_large_header_without_comments_respects_max_chars():
+    post_kw = {"title": "A link", "is_self": False, "url": "https://example.com/" + "u" * 1480}
+    fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload([], **post_kw))})
+    server.set_client(fake)
+    assert len(run_raw(server.get_post(post="abc123", max_chars=2000))) <= 2000

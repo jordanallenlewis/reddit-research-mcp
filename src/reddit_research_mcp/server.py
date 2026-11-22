@@ -184,6 +184,18 @@ def _notes(*notes: str | None) -> str:
     return f" ({'; '.join(kept)})" if kept else ""
 
 
+def _shorten_urls(d: Mapping[str, Any], over: int) -> dict[str, Any]:
+    """Copy of a post with its link URLs shortened by about `over` chars (never below 200)."""
+    out = dict(d)
+    for key in ("url_overridden_by_dest", "url"):
+        v = out.get(key)
+        if isinstance(v, str) and len(v) > 200:
+            keep = max(200, len(v) - over)
+            out[key] = v[:keep] + f"... [{len(v) - keep} more chars]"
+            over = max(0, over - (len(v) - keep) + 0)
+    return out
+
+
 def _fit(head: str, body: str, tail: str, budget: int) -> str:
     """Join head, body and tail; if over budget, cut the body (never the tail) at a line break.
 
@@ -1179,31 +1191,43 @@ async def get_post(
         if cid and cid not in fmt.tree_ids(comments):
             raise await _missing_comment(pid, cid, post_seen=True)
 
-        body_cap = min(body_n, budget - 4000 if budget > 8000 else budget // 3)
         link = fmt.permalink(d) or f"{fmt.REDDIT}/comments/{pid}/"
-        try:
-            header = fmt.post_detail(d, body_cap)
-        except Exception as exc:  # malformed post data must not hide the comments
-            header = f"[{pid}] (could not render the post header: {type(exc).__name__})\npermalink: {link}"
-        selftext_len = len(fmt.clean_text(d.get("selftext")))
-        if selftext_len > body_cap:
-            header += (
-                f"\n(body cut at {body_cap:,} of {selftext_len:,} chars; get_posts(posts=[\"{pid}\"], "
-                "body_chars=40000) returns all of it)"
-            )
         notes = _notes(l_note, d_note, c_note, b_note, m_note)
         if cid:
             sec = f"comments around [{cid}] (context={ctx}, sort={comment_sort}){notes}"
         else:
             sec = f"comments (sort={comment_sort}, limit={lim}, depth={dep}){notes}"
         sec += f"; comment link = {link}<id>/"
-
-        # Loaded comments come first: reserve room for short stub id lists only, render the
-        # comments, then let the top-level stub lines use whatever budget is left.
         id_cap = _footer_id_cap(budget)
         root_stubs = [t.get("data") or {} for t in comments if t.get("kind") == "more"]
         short_root = _root_stub_lines(root_stubs, MIN_STUB_IDS)
         reserve = sum(len(x) + 1 for x in short_root) + FOOTER_RESERVE + id_cap * 9
+
+        def render_header(cap: int) -> str:
+            try:
+                head = fmt.post_detail(d, cap)
+            except Exception as exc:  # malformed post data must not hide the comments
+                return f"[{pid}] (could not render the post header: {type(exc).__name__})\npermalink: {link}"
+            if selftext_len > cap:
+                head += (
+                    f"\n(body cut at {cap:,} of {selftext_len:,} chars; get_posts(posts=[\"{pid}\"], "
+                    "body_chars=40000) returns all of it)"
+                )
+            return head
+
+        selftext_len = len(fmt.clean_text(d.get("selftext")))
+        body_cap = min(body_n, budget - 4000 if budget > 8000 else budget // 3)
+        # The header's fixed lines (title, link, captions, notes) are not cut, so the body gets
+        # what is left after them, the section line and the smallest tail.
+        room = budget - FOOTER_CHARS - len(sec) - 2 - reserve - len(render_header(0))
+        body_cap = max(0, min(body_cap, room))
+        if room < 0:  # the body is already "[N chars]"; a very long link is the next thing to cut
+            d = _shorten_urls(d, -room)
+            room = budget - FOOTER_CHARS - len(sec) - 2 - reserve - len(render_header(0))
+        header = render_header(body_cap)
+
+        # Loaded comments come first: reserve room for short stub id lists only, render the
+        # comments, then let the top-level stub lines use whatever budget is left.
         renderer = fmt.CommentRenderer(max_chars=budget - len(header) - len(sec) - reserve, focus=cid)
         renderer.walk(comments)
         body = renderer.text if renderer.parts else ("" if comments else "(no comments)")
