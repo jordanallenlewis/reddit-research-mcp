@@ -897,6 +897,9 @@ async def get_subreddit_info(
     include_rules: Annotated[bool, Field(description="Include the posting rules.")] = True,
     include_sidebar: Annotated[bool, Field(description="Include the sidebar text (often links and FAQs).")] = False,
     sidebar_chars: Annotated[int, Field(description="Sidebar characters to show, 0 to 50000.")] = 3000,
+    rules_chars: Annotated[
+        int, Field(description="Characters of each rule's description to show, 0 to 10000; 0 lists names only.")
+    ] = 1500,
     include_nsfw: Annotated[bool, Field(description=INCLUDE_NSFW_DESC)] = False,
 ) -> str:
     """Describe a community: size, age, type, description, rules, sidebar and wiki pages.
@@ -909,6 +912,7 @@ async def get_subreddit_info(
     try:
         sr = refs.normalize_subreddit(subreddit, allow_multi=False)
         side_n, s_note = clamp(sidebar_chars, 0, 50_000, "sidebar_chars")
+        rule_n, r_note = clamp(rules_chars, 0, 10_000, "rules_chars")
         client = get_client()
         try:
             about = await client.get(f"/r/{sr}/about")
@@ -930,7 +934,7 @@ async def get_subreddit_info(
         rules_res, wiki_res = await asyncio.gather(
             rules(), client.get(f"/r/{sr}/wiki/pages"), return_exceptions=True
         )
-        out = [fmt.listing_subreddit(d, desc_chars=0).split("\n")[0] + _notes(s_note)]
+        out = [fmt.listing_subreddit(d, desc_chars=0).split("\n")[0] + _notes(s_note, r_note)]
         if d.get("title"):
             out.append("title: " + fmt.flatten(d.get("title")))
         if d.get("public_description"):
@@ -945,12 +949,22 @@ async def get_subreddit_info(
             else:
                 items = (rules_res or {}).get("rules") or []
                 out.append(f"\nrules ({len(items)}):")
+                longest = 0
                 for i, r in enumerate(items, 1):
                     text = fmt.flatten(r.get("description"))
                     line = f"{i}. {fmt.flatten(r.get('short_name'))}"
-                    if text:
-                        line += ": " + fmt.truncate(text, 400)
+                    if text and rule_n:
+                        line += ": " + fmt.truncate(text, rule_n)
+                    if len(text) > rule_n:
+                        longest = max(longest, len(text))
                     out.append(line)
+                if longest and rule_n:
+                    out.append(
+                        f"(some rules are cut: rules_chars={min(longest, 10_000)} shows "
+                        + ("all of them whole)" if longest <= 10_000 else "the most this tool returns)")
+                    )
+                elif longest:
+                    out.append("(rule text hidden: pass rules_chars, up to 10000, to read it)")
 
         if isinstance(wiki_res, BaseException):
             label = getattr(wiki_res, "label", "") or ""

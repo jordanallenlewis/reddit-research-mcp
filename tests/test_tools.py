@@ -929,3 +929,42 @@ def test_post_discussions_full_page_says_more_may_exist():
     server.set_client(FakeReddit({("GET", "/duplicates/abc123"): ok(dup)}))
     out = run(server.find_other_discussions(post_or_url="https://redd.it/abc123", limit=3))
     assert out.endswith("more may exist; raise limit (max 100)")
+
+
+def _rules_fake(rules):
+    about = {"kind": "t5", "data": {"display_name": "RuleSub", "subscribers": 10, "created_utc": 1727827200}}
+    return FakeReddit({
+        ("GET", "/r/rulesub/about"): ok(about),
+        ("GET", "/r/rulesub/about/rules"): ok({"rules": rules}),
+        ("GET", "/r/rulesub/wiki/pages"): ok({"kind": "wikipagelisting", "data": ["index"]}),
+    })
+
+
+def test_subreddit_info_long_rule_shows_whole_at_default():
+    body = "word " * 200  # 1,000 chars
+    server.set_client(_rules_fake([{"short_name": "Long", "description": body}]))
+    out = run(server.get_subreddit_info(subreddit="rulesub"))
+    assert body.strip() in out and "[+" not in out and "rules_chars" not in out
+
+
+def test_subreddit_info_cut_rule_names_argument_and_round_trips():
+    body = "word " * 1000  # 4,999 chars once flattened
+    rules = [{"short_name": "Long", "description": body}, {"short_name": "Short", "description": "ok."}]
+    server.set_client(_rules_fake(rules))
+    out = run(server.get_subreddit_info(subreddit="rulesub", rules_chars=100))
+    assert "[+" in out and "rules_chars=4999" in out
+    full = run(server.get_subreddit_info(subreddit="rulesub", rules_chars=4999))
+    assert body.strip() in full and "[+" not in full and "rules_chars" not in full
+
+
+def test_subreddit_info_rules_chars_zero_gives_names_only():
+    server.set_client(_rules_fake([{"short_name": "Long", "description": "some text here"}]))
+    out = run(server.get_subreddit_info(subreddit="rulesub", rules_chars=0))
+    assert "1. Long" in out and "some text here" not in out and "[+" not in out and "[1" not in out
+
+
+def test_subreddit_info_rules_chars_clamped_and_hint_stays_in_range():
+    server.set_client(_rules_fake([{"short_name": "Huge", "description": "word " * 4000}]))
+    out = run(server.get_subreddit_info(subreddit="rulesub", rules_chars=99999))
+    assert "rules_chars clamped to 10000" in out and "[+" in out
+    assert "rules_chars=10000" in out  # never advises a value above the maximum
