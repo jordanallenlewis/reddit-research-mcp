@@ -868,3 +868,64 @@ def test_wiki_page_list_that_fits_is_unchanged():
     server.set_client(_wiki_listing_fake(names))
     out = run(server.get_subreddit_wiki(subreddit="x1", page="", max_chars=500))
     assert out == "r/x1 wiki pages (20):\n" + "\n".join(names)
+
+
+def _big_t3(id, **kw):
+    return t3(
+        id=id, title="T" * 290, is_self=False, url_overridden_by_dest="https://example.com/" + "p" * 700, **kw
+    )
+
+
+def _url_fake(children):
+    return FakeReddit({("GET", "/api/info"): ok(listing(children))})
+
+
+def test_url_discussions_full_page_says_more_may_exist():
+    server.set_client(_url_fake([t3(id=f"u{i}") for i in range(5)]))
+    out = run(server.find_other_discussions(post_or_url="https://example.com/a", limit=5))
+    assert out.endswith("more may exist; raise limit (max 100)")
+
+
+def test_url_discussions_short_page_has_no_more_line():
+    server.set_client(_url_fake([t3(id=f"u{i}") for i in range(4)]))
+    out = run(server.find_other_discussions(post_or_url="https://example.com/a", limit=5))
+    assert "more may exist" not in out and "shown" not in out
+
+
+def test_url_discussions_full_page_cut_by_nsfw_filter_still_says_more():
+    from test_nsfw import nsfw_t3
+
+    server.set_client(_url_fake([t3(id="u0"), t3(id="u1"), nsfw_t3("u2")]))
+    out = run(server.find_other_discussions(post_or_url="https://example.com/a", limit=3))
+    assert "2 found" in out and "1 NSFW thread hidden" in out
+    assert "more may exist; raise limit (max 100)" in out
+
+
+def test_url_discussions_at_reddits_cap_does_not_say_raise_limit():
+    server.set_client(_url_fake([t3(id=f"u{i}") for i in range(100)]))
+    out = run(server.find_other_discussions(post_or_url="https://example.com/a", limit=100))
+    assert "at most 100 threads" in out and "site:<domain>" in out
+    assert "raise limit" not in out
+
+
+def test_url_discussions_budget_cut_says_n_of_m():
+    server.set_client(_url_fake([_big_t3(f"u{i}") for i in range(100)]))
+    out = run(server.find_other_discussions(post_or_url="https://example.com/a", limit=100))
+    m = re.search(r"(\d+) of 100 threads shown; the rest did not fit", out)
+    assert m and 0 < int(m.group(1)) < 100
+    assert "raise limit" not in out
+
+
+def test_post_discussions_budget_cut_says_n_of_m_not_raise_limit():
+    dup = [listing([t3(id="abc123")]), listing([_big_t3(f"d{i}") for i in range(100)])]
+    server.set_client(FakeReddit({("GET", "/duplicates/abc123"): ok(dup)}))
+    out = run(server.find_other_discussions(post_or_url="https://redd.it/abc123", limit=100))
+    assert re.search(r"\d+ of 100 threads shown", out)
+    assert "raise limit" not in out
+
+
+def test_post_discussions_full_page_says_more_may_exist():
+    dup = [listing([t3(id="abc123")]), listing([t3(id=f"d{i}") for i in range(3)])]
+    server.set_client(FakeReddit({("GET", "/duplicates/abc123"): ok(dup)}))
+    out = run(server.find_other_discussions(post_or_url="https://redd.it/abc123", limit=3))
+    assert out.endswith("more may exist; raise limit (max 100)")

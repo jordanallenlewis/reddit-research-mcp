@@ -184,6 +184,29 @@ def _notes(*notes: str | None) -> str:
     return f" ({'; '.join(kept)})" if kept else ""
 
 
+def _discussions_tail(res: Any, n: int, *, capped: bool, url_branch: bool) -> str | None:
+    """The closing line of find_other_discussions: says when the list is cut or capped.
+
+    `res` is the render result; `capped` means Reddit returned a full page, so more may exist.
+    """
+    parts: list[str] = []
+    if res.truncated:
+        parts.append(
+            f"{res.shown} of {res.total} threads shown; the rest did not fit the output size limit"
+        )
+    if capped:
+        if n < 100:
+            parts.append("more may exist; raise limit (max 100)")
+        elif url_branch:
+            parts.append(
+                "Reddit returns at most 100 threads for a URL, so more may exist; "
+                "search_reddit with site:<domain> can find others"
+            )
+        else:
+            parts.append("Reddit returns at most 100 threads here, so more may exist")
+    return "\n" + "; ".join(parts) if parts else None
+
+
 def _shorten_urls(d: Mapping[str, Any], over: int) -> dict[str, Any]:
     """Copy of a post with its link URLs shortened by about `over` chars (never below 200)."""
     out = dict(d)
@@ -1617,8 +1640,11 @@ async def find_other_discussions(
                 return "\n".join(out)
             res = fmt.render_listing(dups, body_chars=200, max_chars=LISTING_MAX_CHARS)
             out.append("\n" + res.text)
-            if more or res.truncated:
-                out.append("\nmore may exist; raise limit (max 100)")
+            tail = _discussions_tail(
+                res, n, capped=bool(more) or len(dups) + hidden >= n, url_branch=False
+            )
+            if tail:
+                out.append(tail)
             return "\n".join(out)
 
         url = target.url or ""
@@ -1633,6 +1659,7 @@ async def find_other_discussions(
                 if children:
                     url = alt
                     break
+        full_page = len(children) >= n  # before the NSFW filter: Reddit sent a full page
         children, hidden = _drop_nsfw(children, allow)
         header = f"threads that submitted {url}: {len(children)} found" + _notes(
             n_note, _nsfw_note(hidden, what="thread")
@@ -1645,7 +1672,8 @@ async def find_other_discussions(
                 'canonical URL, or search_reddit with a quoted title or domain (e.g. "site name").'
             )
         res = fmt.render_listing(children, body_chars=200, max_chars=LISTING_MAX_CHARS)
-        return f"{header}\n\n{res.text}"
+        tail = _discussions_tail(res, n, capped=full_page, url_branch=True)
+        return f"{header}\n\n{res.text}" + (tail or "")
     except Exception as exc:
         raise await tool_error(exc, post=pid) from exc
 
