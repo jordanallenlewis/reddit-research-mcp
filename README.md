@@ -131,7 +131,7 @@ claude mcp add --scope user reddit -- uv run --directory "$PWD" reddit-readonly-
 | `expand_comments(post, comment_ids, sort="top", max_chars=40000)` | Load the comments behind "more" stubs, as reply trees. Up to 500 ids per call; the rest are listed for the next call. | 1 per 100 ids, plus 1 for the NSFW check unless `include_nsfw=true`, plus 1 when ids come back missing |
 | `get_posts(posts, body_chars=4000, max_chars=60000)` | Full headers and bodies of many posts at once (no comments). Up to 300 posts per call; the rest are listed. An entry that is not a post id or link is skipped and listed, and the valid ones are still read. | 1 per 100 posts |
 | `get_user_activity(username, kind="overview", sort="new", time="all", limit=25, after=None, body_chars=400)` | Account age and karma, recent posts and comments, and which subreddits the activity is concentrated in (from the last 100 items, whatever `limit` is). `[deleted]` is explained, not looked up. | 2 |
-| `find_other_discussions(post_or_url, limit=25)` | Crossposts and other submissions of a post's link, or every thread that submitted an external URL. | 1 to 2 |
+| `find_other_discussions(post_or_url, limit=25)` | Crossposts and other submissions of a post's link, or the threads that submitted an external URL (up to 100; the output says when more may exist). | 1 to 2 |
 
 Every tool also takes `include_nsfw=False` (see [NSFW content](#nsfw-content)); it is left out of
 the signatures above.
