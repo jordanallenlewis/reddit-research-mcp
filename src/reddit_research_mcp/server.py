@@ -978,6 +978,30 @@ async def _wiki_nsfw_block(sr: str) -> str | None:
     return None
 
 
+def _wiki_page_list(sr: str, pages: list[str], limit: int) -> str:
+    """The wiki page list, cut to `limit` chars with a line saying how to get all of it."""
+    head = f"r/{sr} wiki pages ({len(pages)}):\n"
+    full = head + "\n".join(pages)
+    if len(full) <= limit:
+        return full
+    needed = min(len(full), 200_000)
+
+    def tail(shown: int) -> str:
+        return (
+            f"\n+{len(pages) - shown:,} more pages; call "
+            f'get_subreddit_wiki(subreddit="{sr}", page="", max_chars={needed}) for all'
+        )
+
+    shown, used = 0, len(head)
+    for name in pages:
+        add = len(name) + (1 if shown else 0)
+        if used + add + len(tail(shown + 1)) > limit:
+            break
+        used += add
+        shown += 1
+    return head + "\n".join(pages[:shown]) + tail(shown)
+
+
 @mcp.tool(annotations=READ_ONLY, title="Read a subreddit wiki page", output_schema=None)
 @deadline
 async def get_subreddit_wiki(
@@ -1008,7 +1032,7 @@ async def get_subreddit_wiki(
             pages = _wiki_page_names(root)
             if not pages:
                 return f"r/{sr} wiki: no pages"
-            return f"r/{sr} wiki pages ({len(pages)}):\n" + "\n".join(pages)
+            return _wiki_page_list(sr, pages, limit)
         root = await client.get(f"/r/{sr}/wiki/{wiki}")
         d = (root or {}).get("data") or {}
         text = fmt.clean_text(d.get("content_md"))

@@ -21,6 +21,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `get_subreddit_wiki(page="")` now keeps the page list within `max_chars`; a longer list ends with the count left out and the `max_chars` that returns all of it.
 - `search_subreddits` no longer lists a name-prefix match that Reddit gave no details for while NSFW is off, and the "Names starting with" count now matches the names listed.
 - `get_post` and `expand_comments` accept path-only permalinks (`/r/<sub>/comments/<id>/<slug>/`), the form Reddit's JSON `permalink` field returns.
 - After Reddit answered 429 with a long `Retry-After` (and no `x-ratelimit-*` headers), the next
