@@ -838,3 +838,33 @@ def test_get_posts_tail_id_lists_stay_inside_the_budget():
     out = run(server.get_posts(posts=[f"q{i:04d}" for i in range(150)], max_chars=2000))
     assert len(out) <= 2000
     assert "Output budget reached; not shown (149)" in out and "more ids not listed" in out
+
+
+def _wiki_listing_fake(names):
+    return FakeReddit({
+        ("GET", "/r/x1/wiki/pages"): ok({"kind": "wikipagelisting", "data": names}),
+        ("GET", "/r/x1/about"): ok({"kind": "t5", "data": {"display_name": "x1", "over18": False}}),
+    })
+
+
+def test_wiki_page_list_is_cut_to_max_chars_and_follow_up_returns_all():
+    names = [f"guide/page-{i:04d}" for i in range(400)]
+    server.set_client(_wiki_listing_fake(names))
+    out = run(server.get_subreddit_wiki(subreddit="x1", page="", max_chars=500))
+    assert len(out) <= 500
+    assert out.startswith("r/x1 wiki pages (400):\nguide/page-0000")
+    m = re.search(
+        r"\n\+([\d,]+) more pages; call get_subreddit_wiki\(subreddit=\"x1\", page=\"\", max_chars=(\d+)\) for all$",
+        out,
+    )
+    assert m
+    assert out.count("guide/page-") + int(m.group(1).replace(",", "")) == 400
+    full = run(server.get_subreddit_wiki(subreddit="x1", page="", max_chars=int(m.group(2))))
+    assert full == "r/x1 wiki pages (400):\n" + "\n".join(names)
+
+
+def test_wiki_page_list_that_fits_is_unchanged():
+    names = [f"p{i}" for i in range(20)]
+    server.set_client(_wiki_listing_fake(names))
+    out = run(server.get_subreddit_wiki(subreddit="x1", page="", max_chars=500))
+    assert out == "r/x1 wiki pages (20):\n" + "\n".join(names)
