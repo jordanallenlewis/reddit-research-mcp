@@ -81,6 +81,7 @@ def test_search_subreddits_hides_nsfw_communities_and_unchecked_names():
         ("GET", "/subreddits/search"): ok(listing([])),
         ("GET", "/api/search_reddit_names"): ok({"names": ["maybe1"]}),
         ("GET", "/api/info"): RuntimeError("down"),
+        ("GET", "/search"): ok(listing([])),
     })
     server.set_client(fake)
     out = run(server.search_subreddits(query="topic"))
@@ -180,6 +181,7 @@ def _names_fake(names, info_children):
         ("GET", "/subreddits/search"): ok(listing([])),
         ("GET", "/api/search_reddit_names"): ok({"names": names}),
         ("GET", "/api/info"): ok(listing(info_children)),
+        ("GET", "/search"): ok(listing([])),
     })
 
 
@@ -203,3 +205,20 @@ def test_search_subreddits_nsfw_allowed_keeps_unchecked_names():
     out = run(server.search_subreddits(query="topic", include_nsfw=True))
     assert 'Names starting with "topic" (1):' in out and "r/maybe1" in out
     assert "unknown" not in out
+
+
+def test_search_subreddits_post_search_fallback_hides_nsfw_communities():
+    adult = {"kind": "t5", "data": {"display_name": "adult1", "over18": True}}
+    safe = {"kind": "t5", "data": {"display_name": "safe1", "over18": False}}
+    fake = FakeReddit({
+        ("GET", "/subreddits/search"): ok(listing([])),
+        ("GET", "/api/search_reddit_names"): ok({"names": []}),
+        ("GET", "/search"): ok(listing([t3(id="a1", subreddit="adult1"), t3(id="s1", subreddit="safe1"),
+                                        nsfw_t3("n1", subreddit="nsfwonly1")])),
+        ("GET", "/api/info"): ok(listing([adult, safe])),
+    })
+    server.set_client(fake)
+    out = run(server.search_subreddits(query="topic words"))
+    assert "r/safe1" in out and "adult1" not in out and "nsfwonly1" not in out
+    assert "1 NSFW community hidden" in out
+    assert "nsfwonly1" not in next(c for c in fake.calls if c[1] == "/api/info")[2]["sr_name"]

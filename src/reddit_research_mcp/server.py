@@ -763,6 +763,77 @@ async def browse_subreddit(
         raise await tool_error(exc, subreddit=sr or (subreddit or "").strip() or None) from exc
 
 
+async def _communities_from_posts(
+    client: Any, q: str, n: int, allow: bool, skip: set[str], problems: list[str]
+) -> tuple[list[tuple[str, int]], int, int]:
+    """Communities in a post search for `q`, most posts first.
+
+    Returns ([(rendered community, post count)], posts searched, NSFW communities hidden).
+    Communities named in `skip` (already listed) and user profiles are left out. Without
+    allow, a community is shown only when /api/info confirms it is not NSFW.
+    """
+    try:
+        root = await client.get(
+            "/search", q=q, limit=100, sort="relevance", t="all", type="link",
+            include_over_18="on" if allow else None,
+        )
+        posts, _ = _listing_children(root)
+    except _FATAL_ERRORS:
+        raise
+    except Exception as exc:
+        problems.append(f"post search for communities failed: {describe_exception(exc)}")
+        return [], 0, 0
+    posts, _ = _drop_nsfw(posts, allow)
+    posts = [p for p in posts if isinstance(p, Mapping) and isinstance(p.get("data"), Mapping)]
+    counts: dict[str, int] = {}
+    spelled: dict[str, str] = {}
+    for p in posts:
+        d = p.get("data") if isinstance(p, Mapping) else None
+        if not isinstance(d, Mapping):
+            continue
+        name = str(d.get("subreddit") or "")
+        key = name.lower()
+        if not _SUB_NAME.fullmatch(name) or key.startswith("u_") or d.get("subreddit_type") == "user":
+            continue
+        if key in skip:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        spelled.setdefault(key, name)
+    top = sorted(counts, key=lambda k: -counts[k])[:n]  # stable: ties keep relevance order
+    matched = sum(counts.values())
+    if not top:
+        return [], matched, 0
+    found: dict[str, Any] = {}
+    try:
+        info = await client.get("/api/info", sr_name=",".join(spelled[k] for k in top))
+        subs, _ = _listing_children(info)
+        for s in subs:
+            d = s.get("data") if isinstance(s, Mapping) else None
+            if isinstance(d, Mapping) and s.get("kind") == "t5":
+                found[str(d.get("display_name") or "").lower()] = s
+    except _FATAL_ERRORS:
+        raise
+    except Exception as exc:
+        problems.append(f"details for communities from post search unavailable: {describe_exception(exc)}")
+    rows: list[tuple[str, int]] = []
+    hidden = unchecked = 0
+    for k in top:
+        s = found.get(k)
+        if s is None:
+            if allow:
+                rows.append((f"r/{spelled[k]}", counts[k]))
+            else:
+                unchecked += 1
+        elif not allow and fmt.is_nsfw(s):
+            hidden += 1
+        else:
+            rows.append((fmt.render_thing(s, 0), counts[k]))
+    if unchecked:
+        noun = "community" if unchecked == 1 else "communities"
+        problems.append(f"{unchecked} {noun} from post search not shown because their NSFW status is unknown")
+    return rows, matched, hidden
+
+
 @mcp.tool(annotations=READ_ONLY, title="Find subreddits", output_schema=None)
 @deadline
 async def search_subreddits(
@@ -773,7 +844,9 @@ async def search_subreddits(
     """Find communities about a topic, and names that start with the query.
 
     Combines Reddit's description search with a name-prefix lookup, so a guess such as
-    "dremio" (no such subreddit) still surfaces r/dremio_lakehouse. Shows subscribers,
+    "dremio" (no such subreddit) still surfaces r/dremio_lakehouse. When the description
+    search finds nothing, lists the communities with the most posts about the query instead.
+    Shows subscribers,
     creation date, NSFW and access flags, and the public description. Use it when unsure of
     a community's exact name, then pass the name to browse_subreddit,
     search_reddit(subreddit=...) or get_subreddit_info. It finds communities, not posts.
@@ -842,7 +915,22 @@ async def search_subreddits(
             unchecked = before - len(extra) - hidden_names
             if checked and not allow and unchecked > 0:
                 problems.append(f"{unchecked} name matches not shown because their NSFW status is unknown")
-        nsfw = _nsfw_note(hidden_desc + hidden_names, what="community")
+        posted: list = []
+        posted_from = 0
+        hidden_posted = 0
+        if not isinstance(desc_res, BaseException) and not desc_children and not hidden_desc:
+            # Reddit's description search sometimes answers an empty listing for anonymous
+            # tokens (issue #60), and finds nothing for niche topics; communities with posts
+            # about the query are the next best answer (one post search + one details lookup).
+            listed = {x.lower() for x in name_list}  # shown or hidden above: never count twice
+            try:
+                posted, posted_from, hidden_posted = await asyncio.wait_for(
+                    _communities_from_posts(client, q, n, allow, listed, problems),
+                    timeout=2 * LOOKUP_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                problems.append("post search for communities timed out")
+        nsfw = _nsfw_note(hidden_desc + hidden_names + hidden_posted, what="community")
         out = [f'subreddits for "{q}"' + _notes(n_note, nsfw)]
         if desc_children:
             out.append(f"\nBy description ({len(desc_children)}):")
@@ -853,7 +941,13 @@ async def search_subreddits(
                 out.extend(fmt.render_thing(c, 0) for c in name_children)
             else:
                 out.extend(f"r/{x}" for x in extra)
-        if not desc_children and not extra:
+        if posted:
+            out.append(
+                f"\nDescription search found none; communities with posts about it "
+                f"({len(posted)}, from {fmt.plural(posted_from, 'matching post')}):"
+            )
+            out.extend(f"{line}\n  {count} of the matching posts" for line, count in posted)
+        if not desc_children and not extra and not posted:
             out.append("No communities found. Try a broader word, or search_reddit for posts mentioning it.")
         if problems:
             out.append("\nnote: " + "; ".join(problems))

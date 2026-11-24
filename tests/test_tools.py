@@ -968,3 +968,109 @@ def test_subreddit_info_rules_chars_clamped_and_hint_stays_in_range():
     out = run(server.get_subreddit_info(subreddit="rulesub", rules_chars=99999))
     assert "rules_chars clamped to 10000" in out and "[+" in out
     assert "rules_chars=10000" in out  # never advises a value above the maximum
+
+
+def _t5(name, subs=100, **kw):
+    return {"kind": "t5", "data": {"display_name": name, "subscribers": subs, "created_utc": 1727827200,
+                                   "public_description": f"About {name}.", "over18": False, **kw}}
+
+
+def test_search_subreddits_empty_description_search_falls_back_to_post_search():
+    # Issue #60: Reddit's community search can answer an empty listing with no error.
+    posts = [t3(id=f"p{i}", subreddit=sr) for i, sr in enumerate(
+        ["espresso", "Coffee", "espresso", "u_someone", "espresso", "Coffee", "barista"])]
+    fake = FakeReddit({
+        ("GET", "/subreddits/search"): ok(listing([])),
+        ("GET", "/api/search_reddit_names"): ok({"names": []}),
+        ("GET", "/search"): ok(listing(posts)),
+        ("GET", "/api/info"): ok(listing([_t5("barista", 5), _t5("Coffee", 900), _t5("espresso", 1000)])),
+    })
+    server.set_client(fake)
+    out = run(server.search_subreddits(query="home espresso", limit=3))
+    search = next(c for c in fake.calls if c[1] == "/search")
+    assert search[2]["q"] == "home espresso" and search[2]["type"] == "link"
+    assert "include_over_18" not in search[2]
+    info = next(c for c in fake.calls if c[1] == "/api/info")
+    assert info[2]["sr_name"] == "espresso,Coffee,barista"  # most posts first, ties in order, no profiles
+    assert "No communities found" not in out
+    assert "communities with posts about it (3, from 6 matching posts):" in out
+    assert out.index("r/espresso 1,000") < out.index("r/Coffee 900")
+    assert "3 of the matching posts" in out and "2 of the matching posts" in out
+    assert out.index("r/Coffee 900") < out.index("r/barista 5") and "u_someone" not in out
+
+
+def test_search_subreddits_fallback_skips_names_already_listed_and_runs_only_when_empty():
+    fake = FakeReddit({
+        ("GET", "/subreddits/search"): ok(listing([])),
+        ("GET", "/api/search_reddit_names"): ok({"names": ["espresso"]}),
+        ("GET", "/search"): ok(listing([t3(id="p1", subreddit="espresso"), t3(id="p2", subreddit="Coffee")])),
+        ("GET", "/api/info"): lambda p: ok(listing([_t5(n) for n in p["sr_name"].split(",")])),
+    })
+    server.set_client(fake)
+    out = run(server.search_subreddits(query="espresso"))
+    infos = [c[2]["sr_name"] for c in fake.calls if c[1] == "/api/info"]
+    assert infos == ["espresso", "Coffee"]
+    assert out.count("r/espresso ") == 1 and "(1, from 1 matching post)" in out
+
+    fake = FakeReddit({
+        ("GET", "/subreddits/search"): ok(listing([_t5("espresso")])),
+        ("GET", "/api/search_reddit_names"): ok({"names": []}),
+    })
+    server.set_client(fake)
+    run(server.search_subreddits(query="espresso"))
+    assert "/search" not in fake.paths()  # description search worked: no extra request
+
+
+def test_search_subreddits_fallback_failures():
+    base = {
+        ("GET", "/subreddits/search"): ok(listing([])),
+        ("GET", "/api/search_reddit_names"): ok({"names": []}),
+    }
+    fake = FakeReddit({**base, ("GET", "/search"): raw(500, b"oops")})
+    server.set_client(fake)
+    out = run(server.search_subreddits(query="home espresso"))
+    assert "No communities found" in out and "note: post search for communities failed" in out
+
+    fake = FakeReddit({**base, ("GET", "/search"): raw(429, b"", {"retry-after": "60"})})
+    server.set_client(fake)
+    with pytest.raises(ToolError, match="retry after 60 s"):
+        run(server.search_subreddits(query="home espresso"))
+
+    fake = FakeReddit({**base, ("GET", "/search"): ok(listing([t3(id="p1", subreddit="espresso")])),
+                       ("GET", "/api/info"): raw(500, b"oops")})
+    server.set_client(fake)
+    out = run(server.search_subreddits(query="home espresso"))
+    assert "r/espresso" not in out and "1 community from post search not shown" in out
+
+
+def test_search_subreddits_fallback_timeout_keeps_name_results(monkeypatch):
+    monkeypatch.setattr(server, "LOOKUP_TIMEOUT", 0.05)
+
+    class Slow(FakeReddit):
+        async def _send_raw(self, verb, path, params, data, timeout=None):
+            if path == "/search":
+                await asyncio.sleep(5)
+            return await super()._send_raw(verb, path, params, data, timeout)
+
+    fake = Slow({
+        ("GET", "/subreddits/search"): ok(listing([])),
+        ("GET", "/api/search_reddit_names"): ok({"names": ["espresso"]}),
+        ("GET", "/api/info"): ok(listing([_t5("espresso")])),
+        ("GET", "/search"): ok(listing([])),
+    })
+    server.set_client(fake)
+    out = run(server.search_subreddits(query="home espresso"))
+    assert "r/espresso" in out and "post search for communities timed out" in out
+
+
+def test_search_subreddits_fallback_with_nsfw_allowed_and_odd_children():
+    fake = FakeReddit({
+        ("GET", "/subreddits/search"): ok(listing([])),
+        ("GET", "/api/search_reddit_names"): ok({"names": []}),
+        ("GET", "/search"): ok(listing([t3(id="p1", subreddit="espresso"), "junk", {"kind": "t3", "data": {}}])),
+        ("GET", "/api/info"): ok(listing([])),
+    })
+    server.set_client(fake)
+    out = run(server.search_subreddits(query="home espresso", include_nsfw=True))
+    assert next(c for c in fake.calls if c[1] == "/search")[2]["include_over_18"] == "on"
+    assert "(1, from 1 matching post):" in out and "r/espresso\n  1 of the matching posts" in out
