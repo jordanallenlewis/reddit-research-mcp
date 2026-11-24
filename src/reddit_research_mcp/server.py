@@ -503,8 +503,12 @@ async def tool_error(
     post: str | None = None,
     user: str | None = None,
     wiki_page: str | None = None,
+    cursor: str | None = None,
 ) -> ToolError:
-    """Turn any failure into a ToolError (isError=true) with a non-empty, actionable message."""
+    """Turn any failure into a ToolError (isError=true) with a non-empty, actionable message.
+
+    `cursor` is the `after` value the failing listing request sent, if any.
+    """
     if isinstance(exc, ToolError):
         return exc
     if isinstance(exc, InputError):
@@ -560,6 +564,10 @@ async def tool_error(
                 "Reddit may be blocking this network or user agent: set REDDIT_CLIENT_ID and "
                 "REDDIT_CLIENT_SECRET, or a descriptive REDDIT_USER_AGENT (see the README)"
             )
+        if cursor and st == 403:
+            # Reddit answers a cursor it cannot find with a bare 403; a private or banned
+            # community comes with a reason label and is handled above.
+            return ToolError(_cursor_refused(cursor, subj if (subreddit or user) else exc.path, subreddit))
         if user and st in (403, 404):
             return ToolError(
                 f"u/{user} not found: the account was deleted, suspended, or never existed"
@@ -594,6 +602,18 @@ async def tool_error(
     if isinstance(exc, RedditAPIError):
         return ToolError(str(exc))
     return ToolError(f"Unexpected error: {describe_exception(exc)}")
+
+
+def _cursor_refused(cursor: str, target: str, subreddit: str | None) -> str:
+    msg = (
+        f"Reddit refused the cursor after={cursor} for {target} (HTTP 403); it may name an item "
+        "Reddit cannot find. Call again without after to start from the first page, or continue "
+        "from another item of the previous page by passing its id as after (t3_<id> for a post, "
+        "t1_<id> for a comment)"
+    )
+    if subreddit:
+        msg += f"; if the call without after also fails, r/{subreddit} is private or restricted"
+    return msg
 
 
 # ---------------------------------------------------------------- listings
@@ -666,6 +686,7 @@ async def search_reddit(
     characters; the last line gives the cursor for the next page.
     """
     sr = ""
+    cursor = None
     try:
         q = (query or "").strip()
         if not q:
@@ -703,7 +724,7 @@ async def search_reddit(
             )
         return _render_listing_response(header, children, next_after, body_chars=body, empty=empty)
     except Exception as exc:
-        raise await tool_error(exc, subreddit=sr or None) from exc
+        raise await tool_error(exc, subreddit=sr or None, cursor=cursor) from exc
 
 
 @mcp.tool(annotations=READ_ONLY, title="Browse a subreddit", output_schema=None)
@@ -739,6 +760,7 @@ async def browse_subreddit(
     characters; the last line gives the cursor for the next page.
     """
     sr = ""
+    cursor = None
     try:
         sr = refs.normalize_subreddit(subreddit)
         n, n_note = clamp(limit, 1, 100, "limit")
@@ -760,7 +782,9 @@ async def browse_subreddit(
             )
         return _render_listing_response(header, children, next_after, body_chars=body, empty=empty)
     except Exception as exc:
-        raise await tool_error(exc, subreddit=sr or (subreddit or "").strip() or None) from exc
+        raise await tool_error(
+            exc, subreddit=sr or (subreddit or "").strip() or None, cursor=cursor
+        ) from exc
 
 
 async def _communities_from_posts(
@@ -1655,6 +1679,7 @@ async def get_user_activity(
     returns a not-found error. It reads one account's public history; it cannot search users.
     """
     name = None
+    sent_cursor = None  # set only once the listing request (the one that carries `after`) goes out
     try:
         name = refs.normalize_username(username)
         n, n_note = clamp(limit, 1, 100, "limit")
@@ -1667,6 +1692,7 @@ async def get_user_activity(
         if d.get("is_suspended"):
             return f"u/{shown} is suspended; Reddit hides the profile and its history."
         timed = sort in ("top", "controversial")
+        sent_cursor = cursor
         # Always fetch a full page: the subreddit summary needs a real sample even when the
         # caller asks for a few items. The cursor then points after the last item shown.
         root = await client.get(
@@ -1689,7 +1715,9 @@ async def get_user_activity(
             header, children, next_after, body_chars=body, empty=empty, omit_author=True
         )
     except Exception as exc:
-        raise await tool_error(exc, user=name or (username or "").strip() or None) from exc
+        raise await tool_error(
+            exc, user=name or (username or "").strip() or None, cursor=sent_cursor
+        ) from exc
 
 
 def time_now() -> float:
