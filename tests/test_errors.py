@@ -1792,3 +1792,99 @@ def test_token_error_text_from_reddit_is_not_echoed():
     ):
         err = RedditClient(Config("app", CLIENT_ID, SECRET))._auth_failure(exc)
         assert TOKEN_BODY not in str(err) and "forged" not in str(err) and "invalid_grant" in str(err)
+
+
+# ---------------------------------------------------------------- refused cursors (#64)
+
+# Reddit answers a listing cursor it cannot find (after=t3_zzzzzz) with a JSON 403 and no reason.
+CURSOR_403 = ok({"message": "Forbidden", "error": 403}, 403)
+BAD = "t3_zzzzzz"
+
+
+def refuse_cursor(page):
+    """Listing route: 403 when a cursor is sent, the page when it is not."""
+    return lambda params: CURSOR_403 if params.get("after") else ok(page)
+
+
+def test_refused_cursor_on_a_subreddit_listing_is_not_called_private():
+    fake = FakeReddit({
+        ("GET", "/r/x1/new"): refuse_cursor(listing([t3(id="g1", sub="x1")], after="t3_g1")),
+        ("GET", "/api/info"): sfw_info,
+    })
+    server.set_client(fake)
+    with pytest.raises(ToolError) as e:
+        run(server.browse_subreddit(subreddit="x1", listing="new", after=BAD.upper()))
+    msg = str(e.value)
+    assert msg.startswith(f"Reddit refused the cursor after={BAD} for r/x1 (HTTP 403)")
+    assert "Reddit cannot find" in msg and "Call again without after" in msg
+    assert "if the call without after also fails, r/x1 is private or restricted" in msg
+    # The hint never sends the model back to the cursor that just failed.
+    assert "latest" not in msg and "next: after=" not in msg
+    # The hint works: the same call without the cursor reads the community.
+    out = run(server.browse_subreddit(subreddit="x1", listing="new"))
+    assert "[g1]" in out and out.endswith("next: after=t3_g1")
+
+
+def test_refused_cursor_on_subreddit_search_and_all_of_reddit_search():
+    fake = FakeReddit({
+        ("GET", "/r/x1/search"): CURSOR_403,
+        ("GET", "/search"): refuse_cursor(listing([t3(id="s1")])),
+        ("GET", "/api/info"): sfw_info,
+    })
+    server.set_client(fake)
+    with pytest.raises(ToolError, match=rf"^Reddit refused the cursor after={BAD} for r/x1 \(HTTP 403\)"):
+        run(server.search_reddit(query="server", subreddit="x1", after=BAD))
+    with pytest.raises(ToolError) as e:
+        run(server.search_reddit(query='"reddit mcp"', sort="new", after=BAD))
+    msg = str(e.value)
+    assert msg.startswith(f"Reddit refused the cursor after={BAD} for /search (HTTP 403)")
+    assert "private" not in msg and "the requested item" not in msg
+    assert "[s1]" in run(server.search_reddit(query='"reddit mcp"', sort="new"))
+
+
+def test_refused_cursor_on_user_activity_is_not_called_a_missing_account():
+    about = {"kind": "t2", "data": {"name": "example_user", "created_utc": 1600000000, "total_karma": 1}}
+    fake = FakeReddit({
+        ("GET", "/user/example_user/about"): ok(about),
+        ("GET", "/user/example_user/submitted"): refuse_cursor(listing([t3(id="u1")])),
+    })
+    server.set_client(fake)
+    with pytest.raises(ToolError) as e:
+        run(server.get_user_activity(username="example_user", kind="submitted", after=BAD))
+    msg = str(e.value)
+    assert msg.startswith(f"Reddit refused the cursor after={BAD} for u/example_user (HTTP 403)")
+    assert "deleted" not in msg and "private" not in msg
+    assert "[u1]" in run(server.get_user_activity(username="example_user", kind="submitted"))
+
+
+def test_missing_account_with_a_cursor_is_still_not_found():
+    # The cursor is only sent to the listing; a 404 or 403 on /about still means no such account.
+    for status in (403, 404):
+        fake = FakeReddit({("GET", "/user/nobody_here/about"): ok({"message": "x", "error": status}, status)})
+        server.set_client(fake)
+        with pytest.raises(ToolError, match="^u/nobody_here not found"):
+            run(server.get_user_activity(username="nobody_here", after=BAD))
+
+
+def test_other_403s_with_a_cursor_keep_their_meaning():
+    # No cursor: a bare 403 on a community still reads as private or restricted.
+    fake = FakeReddit({("GET", "/r/x1/new"): CURSOR_403})
+    server.set_client(fake)
+    with pytest.raises(ToolError, match=r"^r/x1 is private or restricted \(HTTP 403\)$"):
+        run(server.browse_subreddit(subreddit="x1", listing="new"))
+    # Reddit's own reason wins over the cursor: a private community says so.
+    fake = FakeReddit({("GET", "/r/x1/new"): ok({"reason": "private", "message": "Forbidden", "error": 403}, 403)})
+    server.set_client(fake)
+    with pytest.raises(ToolError, match="^r/x1 is private"):
+        run(server.browse_subreddit(subreddit="x1", listing="new", after=BAD))
+    # An HTML 403 is a blocked network or user agent, cursor or not.
+    html = raw(403, b"<html>blocked</html>", {"content-type": "text/html"})
+    fake = FakeReddit({("GET", "/r/x1/new"): html})
+    server.set_client(fake)
+    with pytest.raises(ToolError, match="^Reddit refused the request with an HTML 403 page"):
+        run(server.browse_subreddit(subreddit="x1", listing="new", after=BAD))
+    # Other statuses with a cursor are untouched.
+    err = run(server.tool_error(HTTPError(503, "/r/x1/new"), subreddit="x1", cursor=BAD))
+    assert str(err).startswith("Reddit returned HTTP 503 twice")
+    err = run(server.tool_error(HTTPError(404, "/user/x1/submitted"), user="x1", cursor=BAD))
+    assert str(err).startswith("u/x1 not found")
