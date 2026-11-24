@@ -21,6 +21,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `search_subreddits` no longer answers "No communities found" when Reddit's description search comes back empty (it sometimes returns an empty listing for anonymous access, and finds nothing for niche topics). It then lists the communities with the most posts about the query, from one post search, with their post counts; NSFW communities stay hidden unless asked for.
 - `get_subreddit_info` no longer cuts each rule at 400 characters with no way to read the rest. A new `rules_chars` argument (default 1500, 0 to 10000; 0 lists names only) sets the limit, and when a rule is still cut the output names the value that shows it whole.
 - `find_other_discussions` now says when its list may be incomplete: a full page from Reddit (also after the NSFW filter) ends with "more may exist", at Reddit's cap of 100 it points to `search_reddit` with `site:` instead of "raise limit", and a list cut by the output size limit says how many threads are shown of how many.
 - `get_subreddit_wiki(page="")` now keeps the page list within `max_chars`; a longer list ends with the count left out and the `max_chars` that returns all of it.
