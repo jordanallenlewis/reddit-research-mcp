@@ -238,6 +238,7 @@ def _fit(head: str, body: str, tail: str, budget: int) -> str:
 
 FOOTER_CHARS = 40  # "\n[12 Reddit requests, 31.4 s]" appended to every result
 MIN_STUB_IDS = 10  # ids a stub line always lists, however small the budget
+MAX_ROOT_STUB_IDS = 5000  # top-level stub ids get_post lists at most: all of them at max_chars=200000
 FOOTER_RESERVE = 600  # coverage and budget lines, without their id lists
 
 
@@ -1277,7 +1278,9 @@ def _coverage(pid: str, total: Any, r: fmt.CommentRenderer, id_cap: int = 100) -
     return lines
 
 
-def _root_stub_lines(stubs: list, cap: int) -> list[str]:
+def _root_stub_lines(stubs: list, cap: int, route: str = "") -> list[str]:
+    """One line per top-level stub; a line whose ids were cut ends with `route` (the call
+    that lists the rest), so no cut id is left without a way to reach it."""
     out = []
     for d in stubs:
         ids = [str(i) for i in (d.get("children") or [])]
@@ -1285,11 +1288,31 @@ def _root_stub_lines(stubs: list, cap: int) -> list[str]:
             parent = str(d.get("parent_id") or "").split("_", 1)[-1]
             out.append(f"[continue: more replies under [{parent}] -> get_post(post, comment_id=\"{parent}\")]")
         else:
+            cut = f"{route}" if len(ids) > cap and route else ""
             out.append(
                 f"[more top-level: {fmt.plural(d.get('count'), 'comment')}; {len(ids)} ids: "
-                f"{fmt.stub_ids(ids, cap)}]"
+                f"{fmt.stub_ids(ids, cap)}{cut}]"
             )
     return out
+
+
+def _root_ids_most(stubs: list) -> int:
+    """The longest id list among top-level "more" stubs (0 when there are none)."""
+    return max((len(d.get("children") or []) for d in stubs if d.get("id") != "_"), default=0)
+
+
+def _root_id_width(stubs: list) -> int:
+    """Characters per listed top-level id, comma included (at least 9, the old estimate)."""
+    ids = [str(i) for d in stubs if d.get("id") != "_" for i in (d.get("children") or [])]
+    return max(9, -(-sum(len(i) + 1 for i in ids) // len(ids))) if ids else 9
+
+
+def _no_route_hint(lim: int) -> str:
+    """For a top-level id list longer than the largest call can print."""
+    hint = "; no single get_post call lists them all"
+    if lim < 500:
+        hint += "; comment_limit=500 loads more of them as comments"
+    return hint
 
 
 @mcp.tool(annotations=READ_ONLY, title="Read a post and its comments", output_schema=None)
@@ -1379,7 +1402,30 @@ async def get_post(
         sec += f"; comment link = {link}<id>/"
         id_cap = _footer_id_cap(budget)
         root_stubs = [t.get("data") or {} for t in comments if t.get("kind") == "more"]
-        short_root = _root_stub_lines(root_stubs, MIN_STUB_IDS)
+
+        def larger_call(mc: int) -> str:
+            """This same get_post call with max_chars=mc (the route for cut top-level ids)."""
+            args = [f'post="{pid}"']
+            if comment_sort != "top":
+                args.append(f'comment_sort="{comment_sort}"')
+            if lim != 200:
+                args.append(f"comment_limit={lim}")
+            if dep != 8:
+                args.append(f"comment_depth={dep}")
+            if cid:
+                args.append(f'comment_id="{cid}"')
+                if ctx:
+                    args.append(f"context={ctx}")
+            if body_n != 6000:
+                args.append(f"body_chars={body_n}")
+            if include_nsfw:
+                args.append("include_nsfw=True")
+            args.append(f"max_chars={mc}")
+            return f" -> get_post({', '.join(args)}) lists them all"
+
+        # Room for the longest route a cut line can carry, so the tail never overflows.
+        route_room = max(len(larger_call(200_000)), len(_no_route_hint(lim)), 105)
+        short_root = _root_stub_lines(root_stubs, MIN_STUB_IDS, " " * route_room)
         reserve = sum(len(x) + 1 for x in short_root) + FOOTER_RESERVE + id_cap * 9
 
         def render_header(cap: int) -> str:
@@ -1400,6 +1446,7 @@ async def get_post(
         # what is left after them, the section line and the smallest tail.
         room = budget - FOOTER_CHARS - len(sec) - 2 - reserve - len(render_header(0))
         body_cap = max(0, min(body_cap, room))
+        full_d = d
         if room < 0:  # the body is already "[N chars]"; a very long link is the next thing to cut
             d = _shorten_urls(d, -room)
             room = budget - FOOTER_CHARS - len(sec) - 2 - reserve - len(render_header(0))
@@ -1412,9 +1459,38 @@ async def get_post(
         body = renderer.text if renderer.parts else ("" if comments else "(no comments)")
         root_lines = short_root
         if root_stubs:
-            spare = budget - len(header) - len(sec) - len(body) - FOOTER_RESERVE - id_cap * 9
-            per_stub = min(_id_cap(budget, fmt.MAX_STUB_IDS), max(MIN_STUB_IDS, spare // 9 // len(root_stubs)))
-            root_lines = _root_stub_lines(root_stubs, per_stub)
+            id_lines = sum(1 for x in root_stubs if x.get("id") != "_")  # each may carry a route
+            spare = budget - len(header) - len(sec) - len(body) - FOOTER_RESERVE - id_cap * 9 - route_room * id_lines
+            # Measure the ids' real width (new Reddit ids are 13 characters plus a comma), so the
+            # listed ids fit in the spare room instead of pushing loaded comments out.
+            id_w = _root_id_width(root_stubs)
+            per_stub = min(_id_cap(budget, MAX_ROOT_STUB_IDS), max(MIN_STUB_IDS, spare // id_w // len(root_stubs)))
+            most = _root_ids_most(root_stubs)
+            route = ""
+            if most > per_stub:
+                # A budget at which every loaded comment and every top-level id fit: the whole
+                # post header, all comments, each stub's full id list, the footer, and slack.
+                whole = fmt.CommentRenderer(max_chars=10**9, focus=cid)
+                whole.walk(comments)
+                try:
+                    head_len = len(fmt.post_detail(full_d, body_n)) + 200
+                except Exception:
+                    head_len = len(header) + body_n + 200
+                ids_need = (
+                    head_len + len(sec) + reserve + route_room * id_lines + FOOTER_CHARS
+                    + len(root_stubs) * (most * id_w + 200) + 1000
+                )
+                need = -(-max(ids_need + len(whole.text), most * 40) // 1000) * 1000
+                if most > MAX_ROOT_STUB_IDS or ids_need > 200_000:
+                    route = _no_route_hint(lim)
+                elif need <= 200_000:
+                    route = larger_call(need)
+                else:  # the ids alone would fit; the loaded comments are what fill the budget
+                    route = (
+                        "; the loaded comments fill even max_chars=200000: a smaller comment_limit "
+                        "leaves room for more ids"
+                    )
+            root_lines = _root_stub_lines(root_stubs, per_stub, route)
         tail = "\n".join([*root_lines, "", *_coverage(pid, d.get("num_comments"), renderer, id_cap)])
         return _fit(f"{header}\n\n{sec}", body, tail, budget)
     except Exception as exc:

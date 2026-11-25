@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from fastmcp.exceptions import ToolError
 from fixtures import FakeReddit, comment, cont, listing, more, ok, post, run, run_raw, sfw_info
@@ -553,3 +555,117 @@ def test_get_post_large_header_without_comments_respects_max_chars():
     fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload([], **post_kw))})
     server.set_client(fake)
     assert len(run_raw(server.get_post(post="abc123", max_chars=2000))) <= 2000
+
+
+# A top-level [more] line cut to fit must name a call that lists every id it cut (#66).
+
+
+def _root_ids(out: str) -> list[str]:
+    line = next(x for x in out.split("\n") if x.startswith("[more top-level:"))
+    ids = line.split(" ids: ", 1)[1]
+    return ids.split(" (+", 1)[0].rstrip("]").split(",")
+
+
+def test_cut_root_stub_names_a_max_chars_that_lists_every_id():
+    ids = [f"x{i:05d}" for i in range(485)]
+    kids = [comment(f"k{i}", "word " * 60) for i in range(150)] + [more(ids, 635)]
+    fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids, selftext="Body " * 300))})
+    server.set_client(fake)
+    out = run_raw(server.get_post(post="abc123"))
+    assert "more ids not listed" in out
+    m = re.search(r'more ids not listed\) -> get_post\(post="abc123", max_chars=(\d+)\) lists them all\]', out)
+    assert m, out[-1500:]
+    again = run_raw(server.get_post(post="abc123", max_chars=int(m.group(1))))
+    assert _root_ids(again) == ids
+    assert "more ids not listed" not in again
+
+
+def test_cut_root_stub_hint_keeps_the_call_s_other_arguments():
+    ids = [f"x{i:05d}" for i in range(900)]
+    kids = [comment(f"k{i}", "word " * 60) for i in range(20)] + [more(ids, 1500)]
+    fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids))})
+    server.set_client(fake)
+    out = run_raw(server.get_post(post="abc123", comment_sort="new", comment_limit=20, comment_depth=2, max_chars=8000))
+    m = re.search(
+        r'-> get_post\(post="abc123", comment_sort="new", comment_limit=20, comment_depth=2, '
+        r"max_chars=(\d+)\) lists them all\]",
+        out,
+    )
+    assert m, out[-1500:]
+    again = run_raw(server.get_post(post="abc123", comment_sort="new", comment_limit=20, comment_depth=2,
+                                    max_chars=int(m.group(1))))
+    assert _root_ids(again) == ids  # over 500 ids: one larger call still lists them all
+
+
+def test_root_stub_too_big_for_any_call_says_so_instead_of_naming_max_chars():
+    ids = [f"x{i:05d}" for i in range(6000)]
+    fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload([comment("k1", "hi"), more(ids, 9000)]))})
+    server.set_client(fake)
+    out = run_raw(server.get_post(post="abc123", max_chars=200_000))
+    assert len(out) <= 200_000
+    line = next(x for x in out.split("\n") if x.startswith("[more top-level:"))
+    assert "max_chars=" not in line
+    assert "no single get_post call lists them all" in line and "comment_limit=500" in line
+    out = run_raw(server.get_post(post="abc123", comment_limit=500, max_chars=200_000))
+    line = next(x for x in out.split("\n") if x.startswith("[more top-level:"))
+    assert "no single get_post call lists them all" in line and "comment_limit" not in line
+
+
+def test_every_unlisted_id_count_has_a_route_in_the_same_output():
+    ids = [f"x{i:05d}" for i in range(485)]
+    kids = [comment(f"k{i}", "word " * 60) for i in range(150)] + [more(ids, 635)]
+    fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids))})
+    server.set_client(fake)
+    for budget in (2000, 6000, 40_000):
+        out = run_raw(server.get_post(post="abc123", max_chars=budget))
+        assert len(out) <= budget
+        for line in out.split("\n"):
+            if "more ids not listed" in line:
+                assert "-> get_post(" in line or "larger max_chars" in line, line
+
+
+def test_long_root_ids_do_not_push_loaded_comments_out():
+    ids = [f"19t4{i:09d}" for i in range(3000)]  # 13-character ids, as Reddit sends today
+    kids = [comment(f"k{i}", "word " * 60) for i in range(150)] + [more(ids, 4000)]
+    fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids))})
+    server.set_client(fake)
+    out = run_raw(server.get_post(post="abc123", max_chars=200_000))
+    assert len(out) <= 200_000
+    assert "comments cut to fit max_chars" not in out and all(f"[k{i}]" in out for i in range(150))
+    assert _root_ids(out) == ids
+    # Comments take most of a 60000 budget: the id list gets the rest, not the comments' room.
+    out = run_raw(server.get_post(post="abc123", max_chars=60_000))
+    assert len(out) <= 60_000
+    assert "comments cut to fit max_chars" not in out and all(f"[k{i}]" in out for i in range(150))
+    out = run_raw(server.get_post(post="abc123"))
+    m = re.search(r'max_chars=(\d+)\) lists them all\]', out)
+    assert m and "comments cut to fit max_chars" not in out
+    again = run_raw(server.get_post(post="abc123", max_chars=int(m.group(1))))
+    assert _root_ids(again) == ids and "comments cut to fit max_chars" not in again
+
+
+def test_several_top_level_stubs_stay_within_budget_and_each_cut_line_has_a_route():
+    stubs = [more([f"a{i:05d}" for i in range(4999)], 6000), more([f"b{i:05d}" for i in range(3000)], 4000),
+             more([f"c{i:05d}" for i in range(900)], 1000)]
+    kids = [comment(f"k{i}", "word " * 60) for i in range(80)] + stubs
+    fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids))})
+    server.set_client(fake)
+    for budget in (6000, 40_000):
+        out = run_raw(server.get_post(post="abc123", max_chars=budget))
+        assert len(out) <= budget
+        for line in out.split("\n"):
+            if line.startswith("[more top-level:") and "more ids not listed" in line:
+                assert "lists them all]" in line or "no single get_post call" in line, line
+
+
+def test_comments_filling_the_budget_are_not_blamed_on_the_id_list():
+    ids = [f"19t4{i:09d}" for i in range(60)]
+    kids = [comment(f"k{i}", "word " * 1000) for i in range(60)] + [more(ids, 80)]
+    fake = FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids))})
+    server.set_client(fake)
+    out = run_raw(server.get_post(post="abc123", max_chars=2000))
+    assert len(out) <= 2000
+    line = next(x for x in out.split("\n") if x.startswith("[more top-level:"))
+    if "more ids not listed" in line:
+        assert "no single get_post call" not in line
+        assert "lists them all]" in line or "a smaller comment_limit" in line, line
