@@ -803,3 +803,37 @@ def test_top_level_continue_lines_stay_within_budget_and_the_route_reaches_them(
     assert m, out[-600:]  # the folded count line names the call that lists them
     again = run_raw(server.get_post(post="abc123", max_chars=int(m.group(1))))
     assert again.count("[continue: more replies under [r") == n_cont, again[-600:]
+
+
+def _oversized_stub_continue_thread(n_ids=6000, n_cont=20, n_comments=40):
+    kids = (
+        [comment(f"k{i}", "word " * 60) for i in range(n_comments)]
+        + [more([f"x{i:05d}" for i in range(n_ids)], 9000)]
+        + [cont(f"t1_r{i:03d}") for i in range(n_cont)]
+    )
+    return FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids, selftext="Body " * 300))})
+
+
+@pytest.mark.parametrize("budget", [2000, 3000, 5000])
+def test_continue_lines_beside_an_oversized_stub_keep_a_route_that_reaches_them(budget):
+    # A top-level stub over the 5000-id cap has no call that lists all its ids, but the
+    # [continue] lines next to it do: their folded line must name that call (#72).
+    server.set_client(_oversized_stub_continue_thread())
+    out = run_raw(server.get_post(post="abc123", max_chars=budget))
+    assert len(out) <= budget, (len(out), out[-600:])
+    if out.count("[continue: more replies under [r") == 20:
+        return  # every line fits as it is
+    line = next(x for x in out.split("\n") if "deeper reply thread" in x)
+    assert "no single get_post call" not in line and "comment_limit=500" not in line, line
+    m = re.search(r"max_chars=(\d+)\) lists them all", line)
+    assert m, line
+    again = run_raw(server.get_post(post="abc123", max_chars=int(m.group(1))))
+    assert len(again) <= int(m.group(1))
+    assert again.count("[continue: more replies under [r") == 20, again[-600:]
+
+
+def test_oversized_stub_keeps_its_no_route_hint_beside_continue_lines():
+    server.set_client(_oversized_stub_continue_thread())
+    out = run_raw(server.get_post(post="abc123", max_chars=2000))
+    line = next(x for x in out.split("\n") if x.startswith("[more top-level:"))
+    assert "no single get_post call lists them all" in line, line

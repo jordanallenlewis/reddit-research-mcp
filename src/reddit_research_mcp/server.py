@@ -1299,10 +1299,13 @@ def _is_continue(d: dict) -> bool:
     return d.get("id") == "_" or not d.get("children")
 
 
-def _root_stub_summary(stubs: list, route: str) -> list[str]:
+def _root_stub_summary(stubs: list, route: str, cont_route: str | None = None) -> list[str]:
     """All top-level "more" stubs as one line naming the route once, and all [continue] lines
-    as one count line naming it too (for many stubs at a small budget). Each continue line
-    has no ids to shorten, so only this fold keeps them inside the budget (#70)."""
+    as one count line naming cont_route (default: the same route) (for many stubs at a small
+    budget). Each continue line has no ids to shorten, so only this fold keeps them inside
+    the budget (#70). The continue lines get their own route because a call can show them
+    all even when an oversized stub's ids fit no call (#72)."""
+    cont_route = route if cont_route is None else cont_route
     more = [d for d in stubs if not _is_continue(d)]
     rest = [d for d in stubs if _is_continue(d)]
     n_ids = sum(len(d.get("children") or []) for d in more)
@@ -1313,7 +1316,9 @@ def _root_stub_summary(stubs: list, route: str) -> list[str]:
         f"[more top-level: {some}{fmt.plural(known, 'comment')} in {len(more)} stubs; {n_ids} ids not listed{route}]"
     ] if more else []
     if rest:
-        head.append(f"[{fmt.plural(len(rest), 'deeper reply thread')} not listed (top-level [continue] lines){route}]")
+        head.append(
+            f"[{fmt.plural(len(rest), 'deeper reply thread')} not listed (top-level [continue] lines){cont_route}]"
+        )
     return head
 
 
@@ -1522,21 +1527,26 @@ async def get_post(
             per_stub = min(_id_cap(budget, MAX_ROOT_STUB_IDS), max(MIN_STUB_IDS, fair))
             most = _root_ids_most(root_stubs)
 
-            def route_for() -> str:
-                """The route a cut top-level line names: the larger call, or why none exists."""
-                # A budget at which every loaded comment and every top-level id fit: the whole
-                # post header, all comments, each stub's full id list, the footer, and slack.
+            def whole_lens() -> tuple[int, int]:
+                """The full post header (with slack) and all loaded comments, in characters."""
                 whole = fmt.CommentRenderer(max_chars=10**9, focus=cid)
                 whole.walk(comments)
                 try:
                     head_len = len(fmt.post_detail(full_d, body_n)) + 200
                 except Exception:
                     head_len = len(header) + body_n + 200
+                return head_len, len(whole.text)
+
+            def route_for() -> str:
+                """The route a cut top-level line names: the larger call, or why none exists."""
+                # A budget at which every loaded comment and every top-level id fit: the whole
+                # post header, all comments, each stub's full id list, the footer, and slack.
+                head_len, whole_len = whole_lens()
                 ids_need = (
                     head_len + len(sec) + reserve + FOOTER_CHARS
                     + sum(len(d.get("children") or []) * id_w + 60 for d in root_stubs) + 1000
                 )
-                need = -(-max(ids_need + len(whole.text), most * 40) // 1000) * 1000
+                need = -(-max(ids_need + whole_len, most * 40) // 1000) * 1000
                 if most > MAX_ROOT_STUB_IDS or ids_need > 200_000:
                     return _no_route_hint(lim)
                 if need <= 200_000:
@@ -1545,6 +1555,22 @@ async def get_post(
                 return (
                     "; the loaded comments fill even max_chars=200000: a smaller comment_limit "
                     "leaves room for more ids"
+                )
+
+            def cont_route_for() -> str:
+                """The route a folded [continue] count line names: a larger call that shows
+                every continue line. A stub too big for any call does not block it: that call
+                lists the stub's first ids (or only its count) beside the continue lines (#72)."""
+                head_len, whole_len = whole_lens()
+                for cap in (MAX_ROOT_STUB_IDS, 0):  # with as many ids as fit, else bare counts
+                    lines = _root_stub_lines(root_stubs, cap, " " * route_room)
+                    need = head_len + len(sec) + reserve + FOOTER_CHARS + _lines_len(lines) + 1000 + whole_len
+                    need = -(-need // 1000) * 1000
+                    if need <= 200_000:
+                        return larger_call(need)
+                return (
+                    "; the loaded comments fill even max_chars=200000: a smaller comment_limit "
+                    "leaves room for these lines"
                 )
 
             # A continue line cut by the fallback below needs the route as well.
@@ -1567,7 +1593,8 @@ async def get_post(
                 root_lines = _root_stub_lines(root_stubs, cap, route)
                 out = assemble()
             if len(out) > budget - FOOTER_CHARS:  # too many lines even as bare counts: one line
-                root_lines = _root_stub_summary(root_stubs, route)
+                cont_route = cont_route_for() if has_cont else ""
+                root_lines = _root_stub_summary(root_stubs, route, cont_route)
                 out = assemble()
         while len(out) > budget - FOOTER_CHARS and id_cap > 0:
             id_cap -= 1
