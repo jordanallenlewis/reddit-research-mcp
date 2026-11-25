@@ -778,3 +778,28 @@ def test_summary_line_says_at_least_when_a_stub_count_is_missing():
     server.set_client(FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(stubs))}))
     out = run_raw(server.get_post(post="abc123", max_chars=2000))
     assert len(out) <= 2000 and "at least 300 comments in 12 stubs" in out, out[-900:]
+
+
+# Top-level [continue] lines at a small budget: they carry no ids to shorten, so they must fold
+# into one count line that still names the call reaching them (#70).
+
+
+def _continue_thread(n_cont, n_comments=40, words=60, selftext="Body " * 300):
+    kids = [comment(f"k{i}", "word " * words) for i in range(n_comments)] + [
+        cont(f"t1_r{i:03d}") for i in range(n_cont)
+    ]
+    return FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids, selftext=selftext))})
+
+
+@pytest.mark.parametrize("n_cont", [20, 40])
+@pytest.mark.parametrize("budget", [2000, 3000])
+def test_top_level_continue_lines_stay_within_budget_and_the_route_reaches_them(n_cont, budget):
+    server.set_client(_continue_thread(n_cont))
+    out = run_raw(server.get_post(post="abc123", max_chars=budget))
+    assert len(out) <= budget, (len(out), out[-600:])
+    if out.count("[continue: more replies under [r") == n_cont:
+        return  # every line fits as it is
+    m = re.search(r"max_chars=(\d+)\) lists them all", out)
+    assert m, out[-600:]  # the folded count line names the call that lists them
+    again = run_raw(server.get_post(post="abc123", max_chars=int(m.group(1))))
+    assert again.count("[continue: more replies under [r") == n_cont, again[-600:]
