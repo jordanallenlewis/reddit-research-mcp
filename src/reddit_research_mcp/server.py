@@ -1562,16 +1562,16 @@ async def get_post(
                 every continue line. A stub too big for any call does not block it: that call
                 lists the stub's first ids (or only its count) beside the continue lines (#72)."""
                 head_len, whole_len = whole_lens()
-                for cap in (MAX_ROOT_STUB_IDS, 0):  # with as many ids as fit, else bare counts
-                    lines = _root_stub_lines(root_stubs, cap, " " * route_room)
-                    need = head_len + len(sec) + reserve + FOOTER_CHARS + _lines_len(lines) + 1000 + whole_len
-                    need = -(-need // 1000) * 1000
-                    if need <= 200_000:
-                        return larger_call(need)
-                return (
-                    "; the loaded comments fill even max_chars=200000: a smaller comment_limit "
-                    "leaves room for these lines"
-                )
+                # Prefer a call that also shows every loaded comment; the comments are trimmed
+                # to fit and the stub lines are not, so a call without room for them still works.
+                for comments_len in (whole_len, 0):
+                    for cap in (MAX_ROOT_STUB_IDS, 0):  # with as many ids as fit, else bare counts
+                        lines = _root_stub_lines(root_stubs, cap, " " * route_room)
+                        need = head_len + len(sec) + reserve + FOOTER_CHARS + _lines_len(lines) + 1000
+                        need = -(-(need + comments_len) // 1000) * 1000
+                        if need <= 200_000:
+                            return larger_call(need)
+                return "; no single get_post call shows them all"
 
             # A continue line cut by the fallback below needs the route as well.
             has_cont = any(_is_continue(x) for x in root_stubs)

@@ -837,3 +837,22 @@ def test_oversized_stub_keeps_its_no_route_hint_beside_continue_lines():
     out = run_raw(server.get_post(post="abc123", max_chars=2000))
     line = next(x for x in out.split("\n") if x.startswith("[more top-level:"))
     assert "no single get_post call lists them all" in line, line
+
+
+def test_continue_route_beside_an_oversized_stub_ignores_comments_the_call_would_trim():
+    # Loaded comments are trimmed to fit; the [continue] lines are not. So long comments must
+    # not make the folded line say no budget has room for those lines (#72 review).
+    kids = (
+        [comment(f"k{i}", "word " * 2000) for i in range(40)]
+        + [more([f"x{i:05d}" for i in range(6000)], 9000)]
+        + [cont(f"t1_r{i:03d}") for i in range(20)]
+    )
+    server.set_client(FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids, selftext="Body " * 300))}))
+    out = run_raw(server.get_post(post="abc123", max_chars=2000))
+    assert len(out) <= 2000
+    line = next(x for x in out.split("\n") if "deeper reply thread" in x)
+    m = re.search(r"max_chars=(\d+)\) lists them all", line)
+    assert m, line
+    again = run_raw(server.get_post(post="abc123", max_chars=int(m.group(1))))
+    assert len(again) <= int(m.group(1))
+    assert again.count("[continue: more replies under [r") == 20, again[-600:]
