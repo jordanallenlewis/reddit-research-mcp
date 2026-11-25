@@ -669,3 +669,112 @@ def test_comments_filling_the_budget_are_not_blamed_on_the_id_list():
     if "more ids not listed" in line:
         assert "no single get_post call" not in line
         assert "lists them all]" in line or "a smaller comment_limit" in line, line
+
+
+# Several top-level stubs at a small budget: the stub lines must shrink, not overflow (#68).
+
+
+def _many_stub_thread(sizes, n_comments=40, words=60, width=13, selftext="Body " * 300):
+    stubs = [more([f"{chr(97 + s)}{'9' * (width - 6)}{i:05d}" for i in range(n)], 100) for s, n in enumerate(sizes)]
+    kids = [comment(f"k{i}", "word " * words) for i in range(n_comments)] + stubs
+    return FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(kids, selftext=selftext))})
+
+
+def _assert_root_lines_have_routes(out):
+    lines = [x for x in out.split("\n") if x.startswith("[more top-level:")]
+    assert lines, out
+    for line in lines:
+        if "not listed" in line:
+            routes = ("lists them all]", "no single get_post call", "a smaller comment_limit")
+            assert any(r in line for r in routes), line
+    return lines
+
+
+@pytest.mark.parametrize("sizes", [[300, 2000, 40], [40, 2000, 2000, 2000, 40, 300], [5, 40, 300, 2000, 300, 11]])
+@pytest.mark.parametrize("budget", [2000, 3000])
+def test_several_top_level_stubs_fit_a_small_budget(sizes, budget):
+    server.set_client(_many_stub_thread(sizes))
+    out = run_raw(server.get_post(post="abc123", max_chars=budget))
+    assert len(out) <= budget, (len(out), out)
+    lines = _assert_root_lines_have_routes(out)
+    # Every stub keeps a line, or one summary line counts every id of every stub.
+    assert len(lines) == len(sizes) or (len(lines) == 1 and f"{sum(sizes)} ids not listed" in lines[0]), lines
+
+
+def test_stub_lines_keep_ten_ids_when_the_budget_has_room():
+    server.set_client(_many_stub_thread([300, 2000, 40], n_comments=3, words=5, selftext=""))
+    out = run_raw(server.get_post(post="abc123", max_chars=3000))
+    assert len(out) <= 3000
+    for line in _assert_root_lines_have_routes(out):
+        assert line.count(",") >= 9, line  # the 10-id floor holds while it fits
+
+
+def test_small_budget_stub_line_that_lists_no_id_still_names_the_route_that_lists_them():
+    sizes = [40, 2000, 2000, 2000, 40, 300]
+    server.set_client(_many_stub_thread(sizes))
+    out = run_raw(server.get_post(post="abc123", max_chars=2000))
+    assert len(out) <= 2000
+    lines = _assert_root_lines_have_routes(out)
+    m = re.search(r'-> get_post\(post="abc123", max_chars=(\d+)\) lists them all\]', "\n".join(lines))
+    assert m, lines
+    again = run_raw(server.get_post(post="abc123", max_chars=int(m.group(1))))
+    got = [x for x in again.split("\n") if x.startswith("[more top-level:")]
+    assert len(got) == len(sizes) and not any("not listed" in x for x in got), got
+
+
+def test_many_stub_shapes_stay_within_budget():
+    import random
+
+    rnd = random.Random(68)
+    for _ in range(400):
+        sizes = [rnd.choice([5, 11, 40, 300, 2000]) for _ in range(rnd.choice([1, 2, 3, 4, 6]))]
+        server.set_client(_many_stub_thread(
+            sizes, n_comments=rnd.choice([0, 3, 40]), words=rnd.choice([5, 60, 400]),
+            width=rnd.choice([6, 13]), selftext="Body " * rnd.choice([0, 300, 2000])))
+        budget = rnd.choice([2000, 2500, 3000, 5000, 20000])
+        out = run_raw(server.get_post(post="abc123", max_chars=budget, body_chars=rnd.choice([0, 6000])))
+        assert len(out) <= budget, (sizes, budget, len(out))
+        _assert_root_lines_have_routes(out)
+
+
+@pytest.mark.parametrize("n_stubs", [8, 10, 16])
+def test_many_stubs_at_the_smallest_budget_share_one_line_with_the_route(n_stubs):
+    server.set_client(_many_stub_thread([2000] * n_stubs))
+    out = run_raw(server.get_post(post="abc123", max_chars=2000))
+    assert len(out) <= 2000, len(out)
+    lines = _assert_root_lines_have_routes(out)
+    joined = "\n".join(lines)
+    assert f"in {n_stubs} stubs; {2000 * n_stubs} ids not listed" in joined or len(lines) == n_stubs, lines
+
+
+def test_three_stubs_at_the_smallest_budget_keep_their_own_lines_with_fewer_ids():
+    server.set_client(_many_stub_thread([40, 40, 40], n_comments=3, words=5))
+    out = run_raw(server.get_post(post="abc123", max_chars=2000))
+    assert len(out) <= 2000
+    lines = _assert_root_lines_have_routes(out)
+    assert len(lines) == 3 and all(" ids: " in x for x in lines), lines  # each still lists ids to expand
+
+
+def test_many_stubs_at_a_small_budget_leave_room_for_loaded_comments():
+    server.set_client(_many_stub_thread([2000] * 10, n_comments=10, words=5))
+    out = run_raw(server.get_post(post="abc123", max_chars=3000))
+    assert len(out) <= 3000
+    assert "Shown 0 of" not in out and "[k0]" in out, out
+
+
+def test_many_small_stubs_name_a_max_chars_that_lists_them_all():
+    stubs = [more([f"s{j:03d}9999999{i}" for i in range(3)], 5) for j in range(1000)]
+    server.set_client(FakeReddit({("GET", "/comments/abc123"): ok(thread_payload([comment("k1", "hi")] + stubs))}))
+    out = run_raw(server.get_post(post="abc123", max_chars=2000))
+    assert len(out) <= 2000 and "no single get_post call" not in out, out[-800:]
+    m = re.search(r"max_chars=(\d+)\) lists them all\]", out)
+    assert m, out[-800:]
+    again = run_raw(server.get_post(post="abc123", max_chars=int(m.group(1))))
+    assert len(again) <= int(m.group(1)) and "not listed" not in again.split("\n\nShown")[0]
+
+
+def test_summary_line_says_at_least_when_a_stub_count_is_missing():
+    stubs = [more([f"a{j}9999999{i}" for i in range(2000)], c) for j, c in enumerate([50, None] * 6)]
+    server.set_client(FakeReddit({("GET", "/comments/abc123"): ok(thread_payload(stubs))}))
+    out = run_raw(server.get_post(post="abc123", max_chars=2000))
+    assert len(out) <= 2000 and "at least 300 comments in 12 stubs" in out, out[-900:]
