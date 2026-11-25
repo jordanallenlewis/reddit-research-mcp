@@ -1294,11 +1294,17 @@ def _root_stub_lines(stubs: list, cap: int, route: str = "") -> list[str]:
     return out
 
 
+def _is_continue(d: dict) -> bool:
+    """A top-level [continue] line: a stub with no ids to list, only a parent to reach."""
+    return d.get("id") == "_" or not d.get("children")
+
+
 def _root_stub_summary(stubs: list, route: str) -> list[str]:
-    """All top-level "more" stubs as one line naming the route once (for many stubs at a
-    small budget); [continue] lines stay as they are."""
-    more = [d for d in stubs if d.get("id") != "_" and d.get("children")]
-    rest = [d for d in stubs if not (d.get("id") != "_" and d.get("children"))]
+    """All top-level "more" stubs as one line naming the route once, and all [continue] lines
+    as one count line naming it too (for many stubs at a small budget). Each continue line
+    has no ids to shorten, so only this fold keeps them inside the budget (#70)."""
+    more = [d for d in stubs if not _is_continue(d)]
+    rest = [d for d in stubs if _is_continue(d)]
     n_ids = sum(len(d.get("children") or []) for d in more)
     counts = [d.get("count") for d in more]
     known = sum(c for c in counts if isinstance(c, int))
@@ -1306,7 +1312,9 @@ def _root_stub_summary(stubs: list, route: str) -> list[str]:
     head = [
         f"[more top-level: {some}{fmt.plural(known, 'comment')} in {len(more)} stubs; {n_ids} ids not listed{route}]"
     ] if more else []
-    return head + _root_stub_lines(rest, 0, route)
+    if rest:
+        head.append(f"[{fmt.plural(len(rest), 'deeper reply thread')} not listed (top-level [continue] lines){route}]")
+    return head
 
 
 def _fair_cap(stubs: list, ids_room: int) -> int:
@@ -1539,7 +1547,9 @@ async def get_post(
                     "leaves room for more ids"
                 )
 
-            route = route_for() if most > per_stub else ""
+            # A continue line cut by the fallback below needs the route as well.
+            has_cont = any(_is_continue(x) for x in root_stubs)
+            route = route_for() if (most > per_stub or has_cont) else ""
             root_lines = _root_stub_lines(root_stubs, per_stub, route)
 
         def assemble() -> str:
@@ -1551,7 +1561,7 @@ async def get_post(
         # stub lines list fewer ids (each keeps its route), then the budget line does (#68).
         if len(out) > budget - FOOTER_CHARS and root_stubs:
             cap = per_stub
-            route = route or (route_for() if most > 0 else "")
+            route = route or (route_for() if (most > 0 or has_cont) else "")
             while len(out) > budget - FOOTER_CHARS and cap > 0:
                 cap -= max(1, cap // 8)
                 root_lines = _root_stub_lines(root_stubs, cap, route)
